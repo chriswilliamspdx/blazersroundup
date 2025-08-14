@@ -1,0 +1,17 @@
+{
+  "client_id": "https://chriswilliamspdx.github.io/blazersroundup/bsky-client.json",
+  "client_name": "Blazers Roundup Bot",
+  "client_uri": "https://chriswilliamspdx.github.io/blazersroundup",
+  "application_type": "web",
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "scope": "atproto",
+  "redirect_uris": ["https://YOUR-RAILWAY-WEB-URL/oauth/callback"],
+  "dpop_bound_access_tokens": true,
+  "token_endpoint_auth_method": "private_key_jwt",
+  "token_endpoint_auth_signing_alg": "ES256",
+  "jwks_uri": "https://chriswilliamspdx.github.io/blazersroundup/jwks.json",
+  "logo_uri": "https://chriswilliamspdx.github.io/blazersroundup/logo.png",
+  "tos_uri": "https://chriswilliamspdx.github.io/blazersroundup/tos.html",
+  "policy_uri": "https://chriswilliamspdx.github.io/blazersroundup/privacy.html"
+}
