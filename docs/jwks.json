@@ -1,0 +1,12 @@
+{
+  "keys": [
+    {
+      "kty": "EC",
+      "use": "sig",
+      "kid": "REPLACE_WITH_YOUR_KID",
+      "crv": "P-256",
+      "x": "REPLACE",
+      "y": "REPLACE"
+    }
+  ]
+}
