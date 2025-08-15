@@ -2,11 +2,11 @@
   "keys": [
     {
       "kty": "EC",
-      "use": "sig",
-      "kid": "REPLACE_WITH_YOUR_KID",
+      "x": "nDLN_ctCCkwT6Oqtw8N5adjF_-rbzZAI5niiFONOCsA",
+      "y": "iaBPEuYMSulKJi3BJOU3H-fbDL3tI79H3_TpYlBvcXE",
       "crv": "P-256",
-      "x": "REPLACE",
-      "y": "REPLACE"
+      "use": "sig",
+      "kid": "373e630b-ea15-4e80-9149-21c39ea65227"
     }
   ]
 }
