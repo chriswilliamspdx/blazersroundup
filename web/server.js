@@ -2,7 +2,7 @@ import express from 'express';
 import bodyParser from 'body-parser';
 import cors from 'cors';
 import { Pool } from 'pg';
-// NOTE: oauth-client is CJS → import default and destructure
+// oauth-client is CJS → import default and destructure
 import oauthPkg from '@atproto/oauth-client';
 const { OAuthClient } = oauthPkg;
 
@@ -19,9 +19,13 @@ const {
   PORT = 8080,
 } = process.env;
 
-if (!DATABASE_URL || !CLIENT_METADATA_URL || !BSKY_OAUTH_PRIVATE_KEY_PEM || !BSKY_OAUTH_KID || !INTERNAL_API_TOKEN) {
-  console.error('Missing required env vars.');
+function die(msg) {
+  console.error(msg);
   process.exit(1);
+}
+
+if (!DATABASE_URL || !CLIENT_METADATA_URL || !BSKY_OAUTH_PRIVATE_KEY_PEM || !BSKY_OAUTH_KID || !INTERNAL_API_TOKEN) {
+  die('Missing required env vars.');
 }
 
 const pool = new Pool({ connectionString: DATABASE_URL, max: 5 });
@@ -68,7 +72,7 @@ const stateStore = {
 };
 
 const sessionStore = {
-  async set(sub, session /* OAuth session object */) {
+  async set(sub, session) {
     const { did, handle, issuer, pdsUrl } = session;
     await pool.query(
       `insert into oauth_sessions(did, handle, issuer, pds_url, session_json, updated_at)
@@ -86,8 +90,18 @@ const sessionStore = {
   },
 };
 
+// Normalize PEM: support both real newlines and literal "\n"
+const PEM_CLEAN = BSKY_OAUTH_PRIVATE_KEY_PEM
+  .replace(/\r\n/g, '\n')
+  .replace(/\\n/g, '\n')
+  .trim();
+
+if (!PEM_CLEAN.includes('-----BEGIN PRIVATE KEY-----') || !PEM_CLEAN.includes('-----END PRIVATE KEY-----')) {
+  die('BSKY_OAUTH_PRIVATE_KEY_PEM does not look like a PKCS8 PEM. Make sure it begins with "-----BEGIN PRIVATE KEY-----" and ends with "-----END PRIVATE KEY-----".');
+}
+
 const keyset = [
-  await JoseKey.fromImportable(BSKY_OAUTH_PRIVATE_KEY_PEM, { kid: BSKY_OAUTH_KID }),
+  await JoseKey.fromImportable(PEM_CLEAN, { kid: BSKY_OAUTH_KID }),
 ];
 
 const oauth = new OAuthClient({
@@ -142,7 +156,6 @@ async function getAgent() {
   const { rows } = await pool.query('select session_json from oauth_sessions limit 1');
   if (!rows[0]) throw new Error('No OAuth session found. Visit /auth/start');
   const session = rows[0].session_json;
-  // Agent accepts a session object from oauth-client in recent versions
   return new Agent(session);
 }
 
@@ -205,4 +218,3 @@ app.post('/post-thread', async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`web listening on :${PORT}`));
-
