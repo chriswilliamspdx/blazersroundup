@@ -2,7 +2,10 @@ import express from 'express';
 import bodyParser from 'body-parser';
 import cors from 'cors';
 import { Pool } from 'pg';
-import { OAuthClient, Session } from '@atproto/oauth-client';
+// NOTE: oauth-client is CJS → import default and destructure
+import oauthPkg from '@atproto/oauth-client';
+const { OAuthClient } = oauthPkg;
+
 import { JoseKey } from '@atproto/jwk-jose';
 import { Agent } from '@atproto/api';
 
@@ -47,10 +50,13 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// --- Stores (per @atproto/oauth-client README) ---
+// --- Stores for @atproto/oauth-client ---
 const stateStore = {
   async set(key, internalState) {
-    await pool.query('insert into oauth_state(k, v) values ($1, $2) on conflict (k) do update set v=excluded.v, created_at=now()', [key, internalState]);
+    await pool.query(
+      'insert into oauth_state(k, v) values ($1, $2) on conflict (k) do update set v=excluded.v, created_at=now()',
+      [key, internalState],
+    );
   },
   async get(key) {
     const { rows } = await pool.query('select v from oauth_state where k=$1', [key]);
@@ -62,14 +68,13 @@ const stateStore = {
 };
 
 const sessionStore = {
-  async set(sub, session /* Session */) {
-    // Persist complete session JSON (includes refresh token etc.)
+  async set(sub, session /* OAuth session object */) {
     const { did, handle, issuer, pdsUrl } = session;
     await pool.query(
       `insert into oauth_sessions(did, handle, issuer, pds_url, session_json, updated_at)
        values($1,$2,$3,$4,$5, now())
        on conflict (did) do update set handle=excluded.handle, issuer=excluded.issuer, pds_url=excluded.pds_url, session_json=excluded.session_json, updated_at=now()`,
-      [did, handle, issuer, pdsUrl, session]
+      [did, handle, issuer, pdsUrl, session],
     );
   },
   async get(sub) {
@@ -94,7 +99,6 @@ const oauth = new OAuthClient({
   keyset,
   stateStore,
   sessionStore,
-  // DNS resolution handled by library; we can use default handle resolution.
 });
 
 // Simple home
@@ -123,7 +127,6 @@ app.get('/auth/start', async (req, res) => {
 app.get('/oauth/callback', async (req, res) => {
   try {
     const result = await oauth.callback(new URLSearchParams(req.url.split('?')[1] ?? ''));
-    // Optionally check handle matches expected
     if (BSKY_EXPECTED_HANDLE && result.session.handle !== BSKY_EXPECTED_HANDLE) {
       return res.status(400).send('Unexpected handle');
     }
@@ -134,13 +137,13 @@ app.get('/oauth/callback', async (req, res) => {
   }
 });
 
-// Internal helper: get agent
+// Internal helper: get agent from stored OAuth session
 async function getAgent() {
-  // Load the only session we expect (bot account)
   const { rows } = await pool.query('select session_json from oauth_sessions limit 1');
   if (!rows[0]) throw new Error('No OAuth session found. Visit /auth/start');
   const session = rows[0].session_json;
-  return new Agent(session); // Agent(oauthSession) per docs
+  // Agent accepts a session object from oauth-client in recent versions
+  return new Agent(session);
 }
 
 // POST /post-thread  { firstText, secondText }
@@ -155,7 +158,7 @@ app.post('/post-thread', async (req, res) => {
     }
     const agent = await getAgent();
 
-    // Build facets (links) using simple regex per docs
+    // Build link facets
     const parseUrls = (text) => {
       const spans = [];
       const urlRe = /https?:\/\/[^\s]+/g;
@@ -166,10 +169,12 @@ app.post('/post-thread', async (req, res) => {
       return spans;
     };
     const makeFacets = (text) => {
-      const textBytes = Buffer.from(text, 'utf8');
       const spans = parseUrls(text);
-      return spans.map(s => ({
-        index: { byteStart: Buffer.byteLength(text.slice(0, s.start), 'utf8'), byteEnd: Buffer.byteLength(text.slice(0, s.end), 'utf8') },
+      return spans.map((s) => ({
+        index: {
+          byteStart: Buffer.byteLength(text.slice(0, s.start), 'utf8'),
+          byteEnd: Buffer.byteLength(text.slice(0, s.end), 'utf8'),
+        },
         features: [{ $type: 'app.bsky.richtext.facet#link', uri: s.url }],
       }));
     };
@@ -200,3 +205,4 @@ app.post('/post-thread', async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`web listening on :${PORT}`));
+
