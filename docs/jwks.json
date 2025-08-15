@@ -2,11 +2,11 @@
   "keys": [
     {
       "kty": "EC",
-      "x": "5BIHG8SK6J00A7-4P8jn2yFn8P7BVtqI-7huBLZrZPY",
-      "y": "bb1Y_mOiFa_ntFoWqpThl3fQFOwnPhdMr_7cV0YWF2w",
+      "x": "p4KlOVkRienk47PSFx6X1D2GSA0kNAjTuOR8RpAkRxA",
+      "y": "4opzdWVkV2EQkpa-UNgwYZfBHP8aOlcAf9CFmEvN27U",
       "crv": "P-256",
       "use": "sig",
-      "kid": "47b5fe78-0fed-4347-8528-80bfb1a9598c"
+      "kid": "e8f48deb-703e-4e68-8beb-2dae597c88b4"
     }
   ]
 }
