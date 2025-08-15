@@ -100,16 +100,15 @@ if (!PEM_CLEAN.includes('-----BEGIN PRIVATE KEY-----') || !PEM_CLEAN.includes('-
   die('BSKY_OAUTH_PRIVATE_KEY_PEM does not look like a PKCS8 PEM. Make sure it begins with "-----BEGIN PRIVATE KEY-----" and ends with "-----END PRIVATE KEY-----".');
 }
 
+// Build keyset from your PKCS8 private key (kid must match jwks.json)
 const keyset = [
   await JoseKey.fromImportable(PEM_CLEAN, { kid: BSKY_OAUTH_KID }),
 ];
 
+// IMPORTANT: load full metadata from your URL (includes private_key_jwt etc.)
 const oauth = new OAuthClient({
   responseMode: 'query',
-  clientMetadata: {
-    client_id: CLIENT_METADATA_URL,
-    jwks_uri: CLIENT_METADATA_URL.replace(/bsky-client\.json$/, 'jwks.json'),
-  },
+  clientMetadataUrl: CLIENT_METADATA_URL,
   keyset,
   stateStore,
   sessionStore,
@@ -218,3 +217,4 @@ app.post('/post-thread', async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`web listening on :${PORT}`));
+
