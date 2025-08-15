@@ -7,21 +7,28 @@ import { exportJWK, exportPKCS8 } from 'jose';
 // Generate Ed25519 keypair (OKP)
 const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 
-// Convert to the formats we need
-const pubJwk = await exportJWK(publicKey);     // public JWK
-const privPem = await exportPKCS8(privateKey); // PKCS8 PEM (private)
+// Convert to formats
+const pubJwk = await exportJWK(publicKey);      // public JWK (no 'd')
+const privJwk = await exportJWK(privateKey);    // private JWK (has 'd')
+const privPem = await exportPKCS8(privateKey);  // PKCS8 PEM
 
-// Add required fields
+// Annotate
 const kid = randomUUID();
-pubJwk.kty = 'OKP';
-pubJwk.use = 'sig';
-pubJwk.kid = kid;
-pubJwk.crv = 'Ed25519'; // OKP curves: Ed25519 | Ed448
+for (const j of [pubJwk, privJwk]) {
+  j.kty = 'OKP';
+  j.use = 'sig';
+  j.kid = kid;
+  j.crv = 'Ed25519';
+}
 
-// Print outputs to copy-paste
 console.log('--- JWKS (public) -> paste into docs/jwks.json ---');
 console.log(JSON.stringify({ keys: [pubJwk] }, null, 2));
-console.log('\n--- PRIVATE KEY (PEM) -> Railway var BSKY_OAUTH_PRIVATE_KEY_PEM ---');
+
+console.log('\n--- PRIVATE JWK (JSON) -> Railway var BSKY_OAUTH_PRIVATE_KEY_JWK ---');
+console.log(JSON.stringify(privJwk, null, 2));
+
+console.log('\n--- PRIVATE KEY (PEM) -> Railway var BSKY_OAUTH_PRIVATE_KEY_PEM (optional) ---');
 console.log(privPem);
+
 console.log('\n--- KID -> Railway var BSKY_OAUTH_KID ---');
 console.log(kid);
