@@ -4,21 +4,21 @@
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { exportJWK, exportPKCS8 } from 'jose';
 
-// Generate an EC P-256 keypair
-const { publicKey, privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+// Generate Ed25519 keypair (OKP)
+const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 
-// Export formats Bluesky expects
-const pubJwk = await exportJWK(publicKey);   // JWK (public)
+// Convert to the formats we need
+const pubJwk = await exportJWK(publicKey);     // public JWK
 const privPem = await exportPKCS8(privateKey); // PKCS8 PEM (private)
 
 // Add required fields
 const kid = randomUUID();
-pubJwk.kty = 'EC';
+pubJwk.kty = 'OKP';
 pubJwk.use = 'sig';
 pubJwk.kid = kid;
-pubJwk.crv = 'P-256';
+pubJwk.crv = 'Ed25519'; // OKP curves: Ed25519 | Ed448
 
-// Print what you need to copy/paste
+// Print outputs to copy-paste
 console.log('--- JWKS (public) -> paste into docs/jwks.json ---');
 console.log(JSON.stringify({ keys: [pubJwk] }, null, 2));
 console.log('\n--- PRIVATE KEY (PEM) -> Railway var BSKY_OAUTH_PRIVATE_KEY_PEM ---');
