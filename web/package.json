@@ -10,8 +10,8 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@atproto/api": "^0.13.24",
-    "@atproto/jwk-jose": "^0.3.4",
+    "@atproto/api": "^0.16.2",
+    "@atproto/jwk-jose": "^0.1.10",
     "@atproto/oauth-client-node": "^0.3.4",
     "body-parser": "^1.20.2",
     "cors": "^2.8.5",
