@@ -1,6 +1,5 @@
-// web/server.js — FULL FILE (paste everything)
+// web/server.js — FULL FILE (replace everything)
 
-// Imports
 import express from 'express';
 import bodyParser from 'body-parser';
 import cors from 'cors';
@@ -9,32 +8,29 @@ import { NodeOAuthClient } from '@atproto/oauth-client-node';
 import { JoseKey } from '@atproto/jwk-jose';
 import { Agent } from '@atproto/api';
 
-// Env
 const {
   DATABASE_URL,
-  CLIENT_METADATA_URL,          // ex: https://chriswilliamspdx.github.io/blazersroundup/bsky-client.json
-  BSKY_OAUTH_PRIVATE_KEY_JWK,   // private EC/P-256 JWK (must include "d"), or:
-  BSKY_OAUTH_PRIVATE_KEY_PEM,   // PKCS8 private key
-  BSKY_OAUTH_KID,               // optional kid override
+  CLIENT_METADATA_URL,          // e.g. https://chriswilliamspdx.github.io/blazersroundup/bsky-client.json
+  BSKY_OAUTH_PRIVATE_KEY_JWK,   // preferred: EC/P-256 private JWK (must include "d")
+  BSKY_OAUTH_PRIVATE_KEY_PEM,   // alternative: PKCS8 private key PEM
+  BSKY_OAUTH_KID,               // optional kid override if your JWK has no kid
   INTERNAL_API_TOKEN,           // required for admin + post routes
-  BSKY_EXPECTED_HANDLE,         // optional safety check
+  BSKY_EXPECTED_HANDLE,         // optional, sanity check
   PORT = 8080,
 } = process.env;
 
-// Helpers
 function die(msg) {
   console.error(msg);
   process.exit(1);
 }
 
-// Basic env checks
 if (!DATABASE_URL || !CLIENT_METADATA_URL || !INTERNAL_API_TOKEN) {
   die('Missing required env vars: DATABASE_URL, CLIENT_METADATA_URL, INTERNAL_API_TOKEN.');
 }
 
-// Postgres
 const pool = new Pool({ connectionString: DATABASE_URL, max: 5 });
 
+// Minimal schema we expect
 async function ensureSchema() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS oauth_sessions (
@@ -53,7 +49,7 @@ async function ensureSchema() {
 }
 await ensureSchema();
 
-// === PRIVATE KEY LOADING (must be EC/P-256) ===
+// ------- Load private key (MUST be EC/P-256) -------
 let keyImportable = null;
 let jwkKid = null;
 
@@ -64,9 +60,7 @@ if (BSKY_OAUTH_PRIVATE_KEY_JWK && BSKY_OAUTH_PRIVATE_KEY_JWK.trim()) {
   } catch {
     die('BSKY_OAUTH_PRIVATE_KEY_JWK is not valid JSON.');
   }
-
-  // If JWKS was pasted, use first key
-  if (jwk && typeof jwk === 'object' && Array.isArray(jwk.keys)) {
+  if (Array.isArray(jwk?.keys)) {
     console.warn('Detected JWKS; using keys[0].');
     jwk = jwk.keys[0];
   }
@@ -80,8 +74,10 @@ if (BSKY_OAUTH_PRIVATE_KEY_JWK && BSKY_OAUTH_PRIVATE_KEY_JWK.trim()) {
   });
 
   if (!jwk || typeof jwk !== 'object') die('Private JWK must be a JSON object.');
-  if (jwk.kty !== 'EC' || jwk.crv !== 'P-256') die(`Private JWK must be EC/P-256. Got kty=${jwk.kty}, crv=${jwk.crv}.`);
-  if (!jwk.d) die('Private JWK missing "d" (you pasted a PUBLIC key).');
+  if (jwk.kty !== 'EC' || jwk.crv !== 'P-256') {
+    die(`Private JWK must be EC/P-256. Got kty=${jwk.kty}, crv=${jwk.crv}.`);
+  }
+  if (!jwk.d) die('Private JWK missing "d" (this looks like a PUBLIC key).');
   if (typeof jwk.kid === 'string') jwkKid = jwk.kid;
   else if (BSKY_OAUTH_KID) { jwk.kid = BSKY_OAUTH_KID; jwkKid = BSKY_OAUTH_KID; }
 
@@ -100,7 +96,7 @@ if (BSKY_OAUTH_PRIVATE_KEY_JWK && BSKY_OAUTH_PRIVATE_KEY_JWK.trim()) {
 const keyset = [await JoseKey.fromImportable(keyImportable)];
 console.log(`Private key imported. kid=${jwkKid ?? BSKY_OAUTH_KID ?? '(none)'}\n`);
 
-// === CLIENT METADATA ===
+// ------- Load client metadata -------
 let clientMetadata;
 try {
   const r = await fetch(CLIENT_METADATA_URL, { redirect: 'follow' });
@@ -110,7 +106,6 @@ try {
   console.error(e);
   die('Could not load CLIENT_METADATA_URL JSON.');
 }
-
 if (!clientMetadata || typeof clientMetadata !== 'object') die('client metadata is not an object.');
 if (!clientMetadata.client_id) die('client metadata missing client_id.');
 if (!clientMetadata.jwks && !clientMetadata.jwks_uri) die('client metadata must include jwks or jwks_uri.');
@@ -122,7 +117,7 @@ console.log('Loaded client metadata summary:', {
   signing_alg: clientMetadata.token_endpoint_auth_signing_alg,
 });
 
-// === OAUTH CLIENT ===
+// ------- OAuth client -------
 const oauth = new NodeOAuthClient({
   responseMode: 'query',
   clientMetadata,
@@ -130,7 +125,8 @@ const oauth = new NodeOAuthClient({
   stateStore: {
     async set(k, v) {
       await pool.query(
-        `INSERT INTO oauth_state(k, v) VALUES ($1,$2)
+        `INSERT INTO oauth_state(k, v)
+         VALUES ($1,$2)
          ON CONFLICT (k) DO UPDATE SET v=EXCLUDED.v, created_at=now()`,
         [k, v],
       );
@@ -145,6 +141,8 @@ const oauth = new NodeOAuthClient({
   },
   sessionStore: {
     async set(sub, session) {
+      // Ensure table shape then upsert
+      await ensureSchema();
       await pool.query(
         `INSERT INTO oauth_sessions(sub, session_json, created_at, updated_at)
          VALUES ($1,$2, now(), now())
@@ -162,12 +160,11 @@ const oauth = new NodeOAuthClient({
   },
 });
 
-// === EXPRESS APP ===
+// ------- Web app -------
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// Home
 app.get('/', async (_req, res) => {
   const { rows } = await pool.query('SELECT sub, updated_at FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1');
   const status = rows[0] ? `Connected (sub ${rows[0].sub})` : 'Not connected';
@@ -180,7 +177,7 @@ app.get('/', async (_req, res) => {
   );
 });
 
-// Start OAuth (handle WITHOUT "@")
+// Start OAuth
 app.get('/auth/start', async (req, res) => {
   try {
     const handle = (req.query.handle?.toString() || 'blazersroundup.bsky.social').replace(/^@/, '');
@@ -198,7 +195,6 @@ app.get('/oauth/callback', async (req, res) => {
     const params = new URLSearchParams(req.url.split('?')[1] ?? '');
     const { session } = await oauth.callback(params);
 
-    // Optional: lock to expected handle
     if (BSKY_EXPECTED_HANDLE && session?.handle && session.handle !== BSKY_EXPECTED_HANDLE) {
       return res.status(400).send(`Unexpected handle: ${session.handle}`);
     }
@@ -217,7 +213,6 @@ app.get('/oauth/callback', async (req, res) => {
   }
 });
 
-// Build an authenticated Agent from stored OAuth session
 async function getAgent() {
   const { rows } = await pool.query(
     `SELECT sub, session_json
@@ -238,7 +233,6 @@ async function getAgent() {
 
   const live = await oauth.restore(sub);
 
-  // Determine service origin (PDS)
   let service = 'https://bsky.social';
   if (live?.pdsUrl) {
     try { service = new URL(live.pdsUrl).origin; } catch {}
@@ -249,7 +243,6 @@ async function getAgent() {
   return agent;
 }
 
-// Link facets helper
 function linkFacets(text) {
   const spans = [];
   const re = /https?:\/\/\S+/g;
@@ -264,7 +257,7 @@ function linkFacets(text) {
   }));
 }
 
-// Protected: post a two-note thread
+// Protected posting endpoint
 app.post('/post-thread', async (req, res) => {
   try {
     const token = req.headers['x-internal-token'];
@@ -294,7 +287,7 @@ app.post('/post-thread', async (req, res) => {
   }
 });
 
-// Debug: show whether we have a session
+// Debug
 app.get('/session/debug', async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT sub, (session_json->>'handle') AS handle, updated_at
@@ -305,49 +298,17 @@ app.get('/session/debug', async (_req, res) => {
   res.json({ haveSession: !!rows[0], row: rows[0] ?? null });
 });
 
-// --- ONE-TIME DB MIGRATION (safe) ---
-// Adds/repairs columns + index without dropping anything.
-app.post('/admin/migrate', async (req, res) => {
-  try {
-    const token = req.headers['x-internal-token'];
-    if (token !== INTERNAL_API_TOKEN) return res.status(401).json({ error: 'unauthorized' });
+// -------- Admin migrations --------
 
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS oauth_sessions (
-        sub          text,
-        session_json jsonb,
-        created_at   timestamptz DEFAULT now(),
-        updated_at   timestamptz DEFAULT now()
-      );
-
-      ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS sub          text;
-      ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS session_json jsonb;
-      ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS created_at   timestamptz DEFAULT now();
-      ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS updated_at   timestamptz DEFAULT now();
-
-      UPDATE oauth_sessions
-         SET sub = COALESCE(sub, session_json->>'sub', session_json->>'did', sub)
-       WHERE sub IS NULL;
-
-      CREATE UNIQUE INDEX IF NOT EXISTS oauth_sessions_sub_unique ON oauth_sessions(sub);
-    `);
-
-    res.json({ ok: true, message: 'migration complete' });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: String(err.message || err) });
-  }
-});
-
-// --- HARD MIGRATION (fix legacy NOT NULL and extra columns) ---
-// Use if you still see errors like "column did ... violates not-null constraint".
+// Drop legacy columns and ensure final minimal schema.
+// Use this first.
 app.post('/admin/migrate-hard', async (req, res) => {
   try {
     const token = req.headers['x-internal-token'];
     if (token !== INTERNAL_API_TOKEN) return res.status(401).json({ error: 'unauthorized' });
 
     await pool.query(`
-      -- Ensure minimal schema we expect
+      -- Make sure table exists
       CREATE TABLE IF NOT EXISTS oauth_sessions (
         sub          text,
         session_json jsonb,
@@ -355,23 +316,43 @@ app.post('/admin/migrate-hard', async (req, res) => {
         updated_at   timestamptz DEFAULT now()
       );
 
-      ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS sub          text;
-      ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS session_json jsonb;
-      ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS created_at   timestamptz DEFAULT now();
-      ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS updated_at   timestamptz DEFAULT now();
-
-      -- Backfill sub from any stored JSON
+      -- Backfill sub
       UPDATE oauth_sessions
          SET sub = COALESCE(sub, session_json->>'sub', session_json->>'did', sub)
        WHERE sub IS NULL;
 
-      -- Remove legacy columns that can block inserts (NOT NULL, etc.)
+      -- Drop legacy columns that cause NOT NULL failures
+      ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS issuer;
       ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS did;
       ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS access_jwt;
       ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS refresh_jwt;
       ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS handle;
+      ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS audience;
+      ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS scope;
+      ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS expires_at;
+      ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS pds_url;
 
-      -- Final model: sub as the unique identity key
+      -- Recreate constraints/indexes
+      DELETE FROM oauth_sessions WHERE sub IS NULL;
+
+      -- Build new table if needed and copy into it to enforce NOT NULL on session_json
+      CREATE TABLE IF NOT EXISTS oauth_sessions__clean (
+        sub          text PRIMARY KEY,
+        session_json jsonb NOT NULL,
+        created_at   timestamptz DEFAULT now(),
+        updated_at   timestamptz DEFAULT now()
+      );
+
+      INSERT INTO oauth_sessions__clean (sub, session_json, created_at, updated_at)
+      SELECT sub, COALESCE(session_json, '{}'::jsonb), COALESCE(created_at, now()), COALESCE(updated_at, now())
+      FROM oauth_sessions
+      ON CONFLICT (sub) DO UPDATE SET
+        session_json = EXCLUDED.session_json,
+        updated_at   = now();
+
+      DROP TABLE oauth_sessions;
+      ALTER TABLE oauth_sessions__clean RENAME TO oauth_sessions;
+
       CREATE UNIQUE INDEX IF NOT EXISTS oauth_sessions_sub_unique ON oauth_sessions(sub);
 
       -- State table (used by OAuth flow)
@@ -382,7 +363,45 @@ app.post('/admin/migrate-hard', async (req, res) => {
       );
     `);
 
-    res.json({ ok: true });
+    res.json({ ok: true, message: 'hard migration complete' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+// Last resort: drop & recreate (old data renamed, not deleted).
+app.post('/admin/reset-oauth-sessions', async (req, res) => {
+  try {
+    const token = req.headers['x-internal-token'];
+    if (token !== INTERNAL_API_TOKEN) return res.status(401).json({ error: 'unauthorized' });
+
+    const suffix = Math.floor(Date.now() / 1000);
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'oauth_sessions') THEN
+          EXECUTE 'ALTER TABLE oauth_sessions RENAME TO oauth_sessions_backup_' || ${suffix};
+        END IF;
+      END$$;
+
+      CREATE TABLE IF NOT EXISTS oauth_sessions (
+        sub          text PRIMARY KEY,
+        session_json jsonb NOT NULL,
+        created_at   timestamptz DEFAULT now(),
+        updated_at   timestamptz DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS oauth_state (
+        k text PRIMARY KEY,
+        v jsonb NOT NULL,
+        created_at timestamptz DEFAULT now()
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS oauth_sessions_sub_unique ON oauth_sessions(sub);
+    `);
+
+    res.json({ ok: true, message: 'oauth_sessions reset; run /auth/start again' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: String(err.message || err) });
@@ -391,4 +410,3 @@ app.post('/admin/migrate-hard', async (req, res) => {
 
 // Start server
 app.listen(PORT, () => console.log(`web listening on :${PORT}`));
-
