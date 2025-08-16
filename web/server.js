@@ -60,6 +60,7 @@ if (BSKY_OAUTH_PRIVATE_KEY_JWK && BSKY_OAUTH_PRIVATE_KEY_JWK.trim()) {
   } catch {
     die('BSKY_OAUTH_PRIVATE_KEY_JWK is not valid JSON. Paste the **PRIVATE JWK (JSON)** printed by the generator (not the public JWKS).');
   }
+  // If someone pasted a JWKS, unwrap the first key
   if (jwk && typeof jwk === 'object' && Array.isArray(jwk.keys)) {
     console.warn('BSKY_OAUTH_PRIVATE_KEY_JWK looks like a JWKS set; using keys[0].');
     jwk = jwk.keys[0];
@@ -74,10 +75,11 @@ if (BSKY_OAUTH_PRIVATE_KEY_JWK && BSKY_OAUTH_PRIVATE_KEY_JWK.trim()) {
   console.log('Loaded JWK summary:', summary);
 
   if (!jwk || typeof jwk !== 'object') die('Private JWK must be a JSON object.');
-  if (jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519') {
-    die(`Private JWK must be OKP/Ed25519. Got kty=${jwk.kty}, crv=${jwk.crv}. Did you paste the public JWKS or an EC key by mistake?`);
+  // IMPORTANT: we require EC / P-256 (ES256) for private_key_jwt with this library
+  if (jwk.kty !== 'EC' || jwk.crv !== 'P-256') {
+    die(`Private JWK must be EC/P-256 (ES256). Got kty=${jwk.kty}, crv=${jwk.crv}.`);
   }
-  if (!jwk.d) die('Private JWK is missing "d" (that means you pasted a **public** key; paste the PRIVATE JWK).');
+  if (!jwk.d) die('Private JWK is missing "d" (that means you pasted a **public** key; paste the PRIVATE JWK with "d").');
 
   if (typeof jwk.kid === 'string') jwkKid = jwk.kid;
   else if (BSKY_OAUTH_KID) { jwk.kid = BSKY_OAUTH_KID; jwkKid = BSKY_OAUTH_KID; }
@@ -95,6 +97,7 @@ if (BSKY_OAUTH_PRIVATE_KEY_JWK && BSKY_OAUTH_PRIVATE_KEY_JWK.trim()) {
   die('Provide either BSKY_OAUTH_PRIVATE_KEY_JWK (recommended) or BSKY_OAUTH_PRIVATE_KEY_PEM.');
 }
 
+// IMPORTANT: do NOT pass a second argument (kid/options) — some versions error out
 const keyset = [ await JoseKey.fromImportable(keyImportable) ];
 console.log(`Private key imported from ${keySource}. kid=${jwkKid ?? BSKY_OAUTH_KID ?? '(none)'}`);
 
@@ -111,7 +114,7 @@ try {
   die('Could not load CLIENT_METADATA_URL JSON.');
 }
 
-// Minimal sanity checks (to avoid the undefined error in oauth-client)
+// Minimal sanity checks
 if (!clientMetadata || typeof clientMetadata !== 'object') die('client metadata JSON is not an object.');
 if (!clientMetadata.client_id) die('client metadata missing client_id.');
 if (!clientMetadata.jwks && !clientMetadata.jwks_uri) die('client metadata must include jwks or jwks_uri.');
