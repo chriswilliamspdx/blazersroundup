@@ -1,11 +1,12 @@
 {
   "keys": [
     {
-      "crv": "Ed25519",
-      "x": "J3CtBgHb0r_Tsud-PSdpQBN2fN6Ne8pFs2AdEm7ApKo",
-      "kty": "OKP",
+      "kty": "EC",
+      "crv": "P-256",
+      "x": "xaeLN7Dj-ImsX8u2zSDl57Xdx2lOXvdRWwKMwXFvl5Q",
+      "y": "f8VHlfQOZwY765JOMww1PxwG706hhFUKF5Nr1lYFuRA",
       "use": "sig",
-      "kid": "c279cdd2-4156-4d3d-a90e-94add8b4f0b6"
+      "kid": "0269065b-ac68-40c5-9f7a-04d28dfa75a9"
     }
   ]
 }
