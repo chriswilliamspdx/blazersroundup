@@ -1,219 +1,259 @@
-// server.js — Node 20+, ESM
-
+// Node 20+, ESM
 import express from 'express';
 import { Pool } from 'pg';
-import { importPKCS8 } from 'jose';
-import { NodeOAuthClient } from '@atproto/oauth-client-node';
-import { AtpAgent } from '@atproto/api';
+import { NodeOAuthClient, NodeDpopStore } from '@atproto/oauth-client-node';
+import { JoseKey } from '@atproto/jwk-jose';
 
-// ---------- Config ----------
-const PORT = process.env.PORT || 8080;
-const DATABASE_URL = process.env.DATABASE_URL;
-const CLIENT_METADATA_URL = process.env.CLIENT_METADATA_URL; // e.g. https://chriswilliamspdx.github.io/blazersroundup/bsky-client.json
-const PRIVATE_KEY_PEM = process.env.BSKY_OAUTH_PRIVATE_KEY_PEM; // PKCS#8 EC P-256
+// ---- Env expectations -------------------------------------------------------
+// DATABASE_URL                 -> Railway Postgres URL (private connection) 
+// CLIENT_METADATA_URL          -> https://<your-gh-username>.github.io/<repo>/bsky-client.json
+// BSKY_OAUTH_PRIVATE_KEY_PEM   -> Your ES256 (P-256) private key in PKCS#8 PEM
+// BSKY_OAUTH_KID               -> kid that matches the public key in your jwks.json
+// PORT (optional)              -> Railway sets PORT; default 8080
+// ---------------------------------------------------------------------------
+
+const {
+  DATABASE_URL,
+  CLIENT_METADATA_URL,
+  BSKY_OAUTH_PRIVATE_KEY_PEM,
+  BSKY_OAUTH_KID,
+  PORT = 8080,
+} = process.env;
 
 if (!DATABASE_URL) throw new Error('Missing DATABASE_URL');
 if (!CLIENT_METADATA_URL) throw new Error('Missing CLIENT_METADATA_URL');
-if (!PRIVATE_KEY_PEM) throw new Error('Missing BSKY_OAUTH_PRIVATE_KEY_PEM');
+if (!BSKY_OAUTH_PRIVATE_KEY_PEM) throw new Error('Missing BSKY_OAUTH_PRIVATE_KEY_PEM');
+if (!BSKY_OAUTH_KID) throw new Error('Missing BSKY_OAUTH_KID');
 
-// Build HTTPS callback from the live Railway hostname
-function getCallbackUrl(req) {
-  const host =
-    process.env.RAILWAY_PUBLIC_DOMAIN ||
-    req.headers['x-forwarded-host'] ||
-    req.headers.host;
-  return `https://${host}/auth/callback`;
-}
+const app = express();
 
-// ---------- DB ----------
+// ---- Postgres setup & schema ------------------------------------------------
 const pool = new Pool({ connectionString: DATABASE_URL });
 
 async function ensureSchema() {
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS oauth_state (
-      key TEXT PRIMARY KEY,
-      val JSONB NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    create table if not exists oauth_state (
+      id text primary key,
+      value jsonb not null,
+      updated_at timestamptz not null default now()
     );
   `);
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS oauth_sessions (
-      key TEXT PRIMARY KEY,          -- DID (subject)
-      val JSONB NOT NULL,            -- tokenSet + metadata
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    create table if not exists oauth_sessions (
+      sub text primary key,
+      issuer text not null,
+      session jsonb not null,
+      updated_at timestamptz not null default now()
+    );
+  `);
+  // Keep track of "current" user for this single-user app
+  await pool.query(`
+    create table if not exists oauth_current (
+      id smallint primary key default 1,
+      sub text
     );
   `);
 }
+await ensureSchema();
 
-// Simple JSON KV helper
-const kv = {
-  async get(table, key) {
-    const { rows } = await pool.query(`SELECT val FROM ${table} WHERE key=$1`, [key]);
-    return rows[0]?.val ?? null;
+// ---- SimpleStore helpers (must have get/set/del) ---------------------------
+// These stores satisfy the SimpleStore<T> shape expected by @atproto/* libs.
+const stateStore = {
+  async get(id) {
+    const r = await pool.query('select value from oauth_state where id=$1', [id]);
+    return r.rows[0]?.value;
   },
-  async set(table, key, val) {
+  async set(id, value) {
     await pool.query(
-      `INSERT INTO ${table} (key, val) VALUES ($1, $2)
-       ON CONFLICT (key) DO UPDATE SET val = EXCLUDED.val, updated_at = now()`,
-      [key, val],
+      `insert into oauth_state(id,value,updated_at)
+       values ($1,$2,now())
+       on conflict(id) do update set value=excluded.value, updated_at=now()`,
+      [id, value]
     );
   },
-  async del(table, key) {
-    await pool.query(`DELETE FROM ${table} WHERE key=$1`, [key]);
-  },
-  async all(table) {
-    const { rows } = await pool.query(`SELECT key, val FROM ${table} ORDER BY key`);
-    return rows;
-  },
-  async clear(table) {
-    await pool.query(`TRUNCATE ${table}`);
+  async del(id) {
+    await pool.query('delete from oauth_state where id=$1', [id]);
   },
 };
 
-// Stores for the OAuth client
-const stateStore = {
-  get: (key) => kv.get('oauth_state', key),
-  set: (key, val) => kv.set('oauth_state', key, val),
-  del: (key) => kv.del('oauth_state', key),
+const sessionStore = {
+  // key is "sub" (the user's DID). value is the SessionData JSON.
+  async get(sub) {
+    const r = await pool.query('select session from oauth_sessions where sub=$1', [sub]);
+    return r.rows[0]?.session;
+  },
+  async set(sub, sessionData) {
+    // issuer isn’t included in SessionData; pull from stored state if present
+    const issuer = sessionData?.issuer ?? 'https://bsky.social';
+    await pool.query(
+      `insert into oauth_sessions(sub,issuer,session,updated_at)
+       values ($1,$2,$3,now())
+       on conflict(sub) do update set issuer=$2, session=$3, updated_at=now()`,
+      [sub, issuer, sessionData]
+    );
+    await pool.query(
+      `insert into oauth_current(id,sub) values (1,$1)
+       on conflict(id) do update set sub=excluded.sub`,
+      [sub]
+    );
+  },
+  async del(sub) {
+    await pool.query('delete from oauth_sessions where sub=$1', [sub]);
+    await pool.query('update oauth_current set sub=null where id=1');
+  },
 };
 
-const tokenStore = {
-  get: (key) => kv.get('oauth_sessions', key),   // key = DID
-  set: (key, val) => kv.set('oauth_sessions', key, val),
-  del: (key) => kv.del('oauth_sessions', key),
-};
-
-// ---------- OAuth client ----------
-async function buildClient(callbackUrl) {
-  // Node 20 has global fetch
-  const mdRes = await fetch(CLIENT_METADATA_URL);
-  if (!mdRes.ok) {
-    throw new Error(`Failed to fetch client metadata: ${mdRes.status}`);
+// ---- Load client metadata & signing key (ES256) -----------------------------
+// The docs require Authorization Code + PKCE + PAR and private_key_jwt using ES256.
+// Your bsky-client.json + jwks.json should reflect that.  
+async function loadClientMetadata(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to fetch client metadata: ${res.status}`);
+  const json = await res.json();
+  // Minimal sanity checks
+  if (!Array.isArray(json.redirect_uris) || json.redirect_uris.length === 0) {
+    throw new Error('client metadata missing redirect_uris');
   }
-  const clientMetadata = await mdRes.json();
-
-  // Ensure our live callback is listed
-  if (!clientMetadata.redirect_uris?.includes(callbackUrl)) {
-    clientMetadata.redirect_uris = [callbackUrl];
-  }
-
-  // Import your ES256 private key (PKCS#8) for DPoP
-  const keyLike = await importPKCS8(PRIVATE_KEY_PEM, 'ES256');
-
-  // Provide a minimal DPoP key store (with required get/set/del).
-  // The library will call these with an identifier; we ignore it and keep one key.
-  let dpopKeyMemory = keyLike;
-  const dpopStore = {
-    async get() { return dpopKeyMemory; },
-    async set(val) { dpopKeyMemory = val; },
-    async del() { dpopKeyMemory = undefined; },
-  };
-
-  return new NodeOAuthClient({
-    clientMetadata,
-    stateStore,
-    tokenStore,
-    dpopStore, // <<— important: has get/set/del to prevent the 'reading del' crash
-  });
+  return json;
 }
 
-async function getAgent(oauth) {
-  const rows = await kv.all('oauth_sessions');
-  if (!rows.length) {
+function summarizeKey(jwk) {
+  return {
+    type: typeof jwk,
+    kty: jwk.kty,
+    crv: jwk.crv,
+    has_d: !!jwk.d,
+    kid_type: typeof jwk.kid,
+  };
+}
+
+const clientMetadata = await loadClientMetadata(CLIENT_METADATA_URL);
+
+// Import your ES256 private key (PKCS#8 PEM) and wrap it for the library
+// (This matches the library’s expected "keyset" usage.)
+const privateKey = await JoseKey.fromPKCS8(BSKY_OAUTH_PRIVATE_KEY_PEM, 'ES256', {
+  kid: BSKY_OAUTH_KID,
+});
+console.log('Loaded JWK summary:', summarizeKey(privateKey.toJWK(true)));
+console.log(`Private key imported. kid=${BSKY_OAUTH_KID}`);
+
+// ---- Build OAuth client -----------------------------------------------------
+// IMPORTANT: dpopStore must be a valid SimpleStore<NodeDpopKey> (with get/set/del).
+// Using the official memory() store avoids the “reading 'del'” crash.  
+const oauthClient = new NodeOAuthClient({
+  metadata: clientMetadata,
+  keyset: [privateKey],            // used for private_key_jwt and DPoP signing (ES256)
+  dpopStore: NodeDpopStore.memory(), // or NodeDpopStore.sqlite('/data/dpop.sqlite')
+  stateStore,                      // persists PAR/PKCE state across the redirect
+  sessionStore,                    // persists user session (access/refresh JWTs)
+});
+
+console.log('Loaded client metadata summary:', {
+  has_jwks: !!clientMetadata.jwks,
+  has_jwks_uri: !!clientMetadata.jwks_uri,
+  token_auth_method: clientMetadata.token_endpoint_auth_method,
+  signing_alg: clientMetadata.token_endpoint_auth_signing_alg,
+});
+
+// ---- Helpers to fetch current session & agent -------------------------------
+async function getCurrentSub() {
+  const r = await pool.query('select sub from oauth_current where id=1');
+  return r.rows[0]?.sub;
+}
+
+async function getAgent() {
+  const sub = await getCurrentSub();
+  if (!sub) {
     throw new Error('No OAuth session found. Visit /auth/start first.');
   }
-
-  const { key: did } = rows[0];
-  const tokenSet = await oauth.getTokenSet(did); // refreshes if needed
-  if (!tokenSet?.access_token) {
+  const sess = await sessionStore.get(sub);
+  if (!sess) {
     throw new Error('OAuth session expired/cleared. Visit /auth/start to reconnect.');
   }
-
-  const agent = new AtpAgent({ service: 'https://bsky.social' });
-  await agent.resumeSession({
-    accessJwt: tokenSet.access_token,
-    refreshJwt: tokenSet.refresh_token,
-    did,
-    handle: tokenSet.handle ?? undefined,
-  });
-  return agent;
+  // NodeOAuthClient constructs an agent on-demand from stored session
+  return oauthClient.getAgent({ sub });
 }
 
-// ---------- App ----------
-const app = express();
-app.use(express.json());
+// ---- Routes -----------------------------------------------------------------
 
-app.get('/', (_req, res) => res.type('text/plain').send('OK'));
+// Health
+app.get('/health', (_req, res) => res.type('text/plain').send('ok'));
 
+// Begin OAuth (expects ?handle=@yourname.bsky.social, though it’s optional)
 app.get('/auth/start', async (req, res) => {
   try {
-    await ensureSchema();
-    const callbackUrl = getCallbackUrl(req);
-    const oauth = await buildClient(callbackUrl);
-
-    const handle = (req.query.handle || '').toString() || undefined;
-    const prompt = (req.query.prompt || '').toString() || undefined;
-
-    const url = await oauth.authorize('https://bsky.social', {
-      redirectUri: callbackUrl,
+    const handle = (req.query.handle || '').toString().trim();
+    const url = await oauthClient.authorize({
+      // If you pass a handle, the server may use it as login hint.
+      handle: handle || undefined,
+      // Use the first (https) redirect URI from your client metadata
+      redirectUri: clientMetadata.redirect_uris[0],
+      // Bluesky scope is "atproto"
       scope: 'atproto',
-      login_hint: handle,
-      prompt, // 'consent' to force approval screen if needed
     });
-
-    res.redirect(url.toString());
+    return res.redirect(url);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'auth start failed' });
+    return res.status(500).json({ error: 'failed to start auth' });
   }
 });
 
-app.get('/auth/callback', async (req, res) => {
+// OAuth callback (the redirect_uri you registered)
+app.get('/oauth/callback', async (req, res) => {
   try {
-    await ensureSchema();
-    const callbackUrl = getCallbackUrl(req);
-    const oauth = await buildClient(callbackUrl);
-
-    await oauth.callback('https://bsky.social', req.url); // stores tokenSet under DID
-    res.type('text/plain').send('OAuth complete. You can close this window.');
+    // Reconstruct full URL for the library so it can read code/state/iss
+    const fullUrl = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+    const { sub } = await oauthClient.callback(fullUrl); // stores session via sessionStore.set(sub, ...)
+    // Mark this as the active session for our single-user app
+    await pool.query(
+      `insert into oauth_current(id,sub) values (1,$1)
+       on conflict(id) do update set sub=excluded.sub`,
+      [sub]
+    );
+    return res.type('text/plain').send('OAuth complete. You can close this window.');
   } catch (err) {
     console.error(err);
-    res.status(400).json({ error: 'oauth callback failed' });
+    return res.status(400).json({ error: 'oauth callback failed' });
   }
 });
 
-// Debug / admin
+// Clear current session (manual logout/reset)
+app.post('/auth/logout', async (_req, res) => {
+  try {
+    const sub = await getCurrentSub();
+    if (sub) await sessionStore.del(sub);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'logout failed' });
+  }
+});
+
+// Debug – shows whether we have a session in DB
 app.get('/session/debug', async (_req, res) => {
-  const rows = await kv.all('oauth_sessions');
-  res.json({ haveSession: rows.length > 0, rows });
+  const sub = await getCurrentSub();
+  if (!sub) return res.json({ haveSession: false });
+  const row = await sessionStore.get(sub);
+  return res.json({ haveSession: !!row, row: row ? { sub, updated_at: new Date().toISOString() } : null });
 });
 
-app.post('/admin/clear-session', async (_req, res) => {
-  await kv.clear('oauth_sessions');
-  await kv.clear('oauth_state');
-  res.json({ cleared: true });
-});
-
-// Simple post test
-app.post('/post', async (req, res) => {
+// Example protected action (post a plain note)
+app.post('/post/test', express.json(), async (req, res) => {
   try {
-    const callbackUrl = getCallbackUrl(req);
-    const oauth = await buildClient(callbackUrl);
-    const agent = await getAgent(oauth);
-
-    const text = (req.body?.text || '').toString().slice(0, 300) || 'hello from OAuth bot';
-    const result = await agent.post({ text });
-    res.json({ ok: true, uri: result.uri });
+    const agent = await getAgent();
+    const text = (req.body?.text || 'Hello from OAuth client').toString();
+    const r = await agent.post({
+      $type: 'app.bsky.feed.post',
+      text,
+      createdAt: new Date().toISOString(),
+    });
+    return res.json({ ok: true, uri: r?.uri });
   } catch (err) {
-    const msg = (err?.message || '').toLowerCase();
-    if (msg.includes('no oauth session') || msg.includes('expired/cleared')) {
-      return res.status(401).json({ error: 'reauth required' });
-    }
     console.error(err);
-    res.status(500).json({ error: 'post failed' });
+    return res.status(401).json({ error: 'post failed' });
   }
 });
 
-app.listen(PORT, () => console.log(`web listening on :${PORT}`));
-
+app.listen(PORT, () => {
+  console.log(`web listening on :${PORT}`);
+});
