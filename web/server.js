@@ -1,227 +1,276 @@
-// server.js — Node 20+, ESM
+// server.js (ESM) - Bluesky OAuth + Posting API
+import express from 'express'
+import { Pool } from 'pg'
+import { randomUUID } from 'node:crypto'
+import { NodeOAuthClient } from '@atproto/oauth-client-node'
+import { JoseKey } from '@atproto/jwk-jose'
+import { Agent } from '@atproto/api'
 
-import express from 'express';
-import { Pool } from 'pg';
-import { importPKCS8, exportJWK } from 'jose';
-import { NodeOAuthClient } from '@atproto/oauth-client-node';
-import { AtpAgent } from '@atproto/api';
+// ------------------------------
+// Env Variables
+// ------------------------------
+const {
+  PORT = 8080,
+  DATABASE_URL,
+  CLIENT_METADATA_URL,        // Full URL to your hosted bsky-client.json
+  BSKY_OAUTH_PRIVATE_KEY,     // Private key (PKCS8 PEM or JWK JSON string)
+  BSKY_OAUTH_KID,             // KID for the above private key
+  BSKY_EXPECTED_HANDLE,       // e.g. @yourhandle.bsky.social (optional)
+  INTERNAL_API_TOKEN,         // Shared secret token for internal API calls
+  APP_NAME = 'Blazers Roundup Bot',
+  APP_SITE = 'https://example.com',
+  APP_LOGO = 'https://example.com/logo.png',
+  APP_TOS = 'https://example.com/tos',
+  APP_POLICY = 'https://example.com/privacy',
+} = process.env
 
-// ---------- Config ----------
-const PORT = process.env.PORT || 8080;
-const DATABASE_URL = process.env.DATABASE_URL;
-const CLIENT_METADATA_URL = process.env.CLIENT_METADATA_URL; // e.g. https://chriswilliamspdx.github.io/blazersroundup/bsky-client.json
-const PRIVATE_KEY_PEM = process.env.BSKY_OAUTH_PRIVATE_KEY_PEM; // PKCS#8 EC P-256
+// Required env checks
+if (!DATABASE_URL) throw new Error('Missing DATABASE_URL')
+if (!CLIENT_METADATA_URL) throw new Error('Missing CLIENT_METADATA_URL (URL to /bsky-client.json)')
+if (!BSKY_OAUTH_PRIVATE_KEY) throw new Error('Missing BSKY_OAUTH_PRIVATE_KEY (your private key PEM or JWK)')
+if (!BSKY_OAUTH_KID) throw new Error('Missing BSKY_OAUTH_KID')
+if (!INTERNAL_API_TOKEN) throw new Error('Missing INTERNAL_API_TOKEN')
 
-if (!DATABASE_URL) throw new Error('Missing DATABASE_URL');
-if (!CLIENT_METADATA_URL) throw new Error('Missing CLIENT_METADATA_URL');
-if (!PRIVATE_KEY_PEM) throw new Error('Missing BSKY_OAUTH_PRIVATE_KEY_PEM');
+// ------------------------------
+// Postgres Setup
+// ------------------------------
+const pg = new Pool({ connectionString: DATABASE_URL })
+// Create tables for OAuth state and sessions (if not exist)
+await pg.query(`
+CREATE TABLE IF NOT EXISTS oauth_state (
+  key        TEXT PRIMARY KEY,
+  value      JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS oauth_sessions (
+  sub        TEXT PRIMARY KEY,
+  value      JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+`)
 
-// Build HTTPS callback from the live Railway hostname
-function getCallbackUrl(req) {
-  const host =
-    process.env.RAILWAY_PUBLIC_DOMAIN ||
-    req.headers['x-forwarded-host'] ||
-    req.headers.host;
-  return `https://${host}/auth/callback`;
-}
-
-// ---------- DB ----------
-const pool = new Pool({ connectionString: DATABASE_URL });
-
-// Create simple KV tables the OAuth client stores will use
-async function ensureSchema() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS oauth_state (
-      key TEXT PRIMARY KEY,
-      val JSONB NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS oauth_sessions (
-      key TEXT PRIMARY KEY,          -- DID (subject)
-      val JSONB NOT NULL,            -- tokenSet + metadata
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-  `);
-}
-
-// Tiny KV helper
-const kv = {
-  async get(table, key) {
-    const { rows } = await pool.query(
-      `SELECT val FROM ${table} WHERE key=$1`,
-      [key],
-    );
-    return rows[0]?.val ?? null;
-  },
-  async set(table, key, val) {
-    await pool.query(
-      `INSERT INTO ${table} (key, val) VALUES ($1, $2)
-       ON CONFLICT (key) DO UPDATE SET val = EXCLUDED.val, updated_at = now()`,
-      [key, val],
-    );
-  },
-  async del(table, key) {
-    await pool.query(`DELETE FROM ${table} WHERE key=$1`, [key]);
-  },
-  async all(table) {
-    const { rows } = await pool.query(
-      `SELECT key, val FROM ${table} ORDER BY key`,
-    );
-    return rows;
-  },
-  async clear(table) {
-    await pool.query(`TRUNCATE ${table}`);
-  },
-};
-
-// Stores wired into the OAuth client
+// ------------------------------
+// Implement stateStore and sessionStore for NodeOAuthClient
+// ------------------------------
 const stateStore = {
-  get: (key) => kv.get('oauth_state', key),
-  set: (key, val) => kv.set('oauth_state', key, val),
-  del: (key) => kv.del('oauth_state', key),
-};
-
-const tokenStore = {
-  get: (key) => kv.get('oauth_sessions', key), // key is DID
-  set: (key, val) => kv.set('oauth_sessions', key, val),
-  del: (key) => kv.del('oauth_sessions', key),
-};
-
-// ---------- OAuth client ----------
-async function buildClient(callbackUrl) {
-  // Use global fetch (Node 20) — no node-fetch import required
-  const mdRes = await fetch(CLIENT_METADATA_URL);
-  if (!mdRes.ok) {
-    throw new Error(`Failed to fetch client metadata: ${mdRes.status}`);
-  }
-  const clientMetadata = await mdRes.json();
-
-  // Ensure our live callback is listed
-  if (!clientMetadata.redirect_uris?.includes(callbackUrl)) {
-    clientMetadata.redirect_uris = [callbackUrl];
-  }
-
-  // Import your ES256 private key (PKCS#8) for DPoP
-  const keyLike = await importPKCS8(PRIVATE_KEY_PEM, 'ES256');
-  const dpopJwk = await exportJWK(keyLike);
-  dpopJwk.alg = 'ES256';
-  dpopJwk.use = 'sig';
-
-  return new NodeOAuthClient({
-    clientMetadata,
-    stateStore,
-    tokenStore,
-    dpopKey: keyLike,
-  });
+  async set(key, internalState) {
+    await pg.query(
+      `INSERT INTO oauth_state(key, value) VALUES ($1, $2)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [key, internalState],
+    )
+  },
+  async get(key) {
+    const res = await pg.query(`SELECT value FROM oauth_state WHERE key = $1`, [key])
+    return res.rows[0]?.value
+  },
+  async del(key) {
+    await pg.query(`DELETE FROM oauth_state WHERE key = $1`, [key])
+  },
 }
 
-// Get an authenticated AT agent using the freshest tokens from the store
-async function getAgent(oauth) {
-  const rows = await kv.all('oauth_sessions');
-  if (!rows.length) {
-    throw new Error('No OAuth session found. Visit /auth/start first.');
-  }
-
-  // If you only authorize one account, first row is fine.
-  const { key: did } = rows[0];
-
-  // Ask the client for the tokenSet (it will refresh if needed)
-  const tokenSet = await oauth.getTokenSet(did);
-  if (!tokenSet?.access_token) {
-    throw new Error('OAuth session expired/cleared. Visit /auth/start to reconnect.');
-  }
-
-  const agent = new AtpAgent({ service: 'https://bsky.social' });
-  await agent.resumeSession({
-    accessJwt: tokenSet.access_token,
-    refreshJwt: tokenSet.refresh_token,
-    did,
-    handle: tokenSet.handle ?? undefined,
-  });
-  return agent;
+const sessionStore = {
+  async set(sub, sessionData) {
+    await pg.query(
+      `INSERT INTO oauth_sessions(sub, value, updated_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (sub) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+      [sub, sessionData],
+    )
+  },
+  async get(sub) {
+    const res = await pg.query(`SELECT value FROM oauth_sessions WHERE sub = $1`, [sub])
+    return res.rows[0]?.value
+  },
+  async del(sub) {
+    await pg.query(`DELETE FROM oauth_sessions WHERE sub = $1`, [sub])
+  },
 }
 
-// ---------- App ----------
-const app = express();
-app.use(express.json());
+// ------------------------------
+// Import private key and prepare keyset (ES256 / P-256 key for client auth)
+// ------------------------------
+const key = await JoseKey.fromImportable(BSKY_OAUTH_PRIVATE_KEY, BSKY_OAUTH_KID)
+const keyset = [key]
 
-app.get('/', (_req, res) => res.type('text/plain').send('OK'));
+// ------------------------------
+// Build OAuth client metadata object and NodeOAuthClient
+// ------------------------------
+const redirectUri = new URL(CLIENT_METADATA_URL)
+redirectUri.pathname = '/oauth/callback'
 
-// Start OAuth
-app.get('/auth/start', async (req, res) => {
-  try {
-    await ensureSchema();
-    const callbackUrl = getCallbackUrl(req);
-    const oauth = await buildClient(callbackUrl);
+const clientMetadata = {
+  client_id: CLIENT_METADATA_URL,
+  client_name: APP_NAME,
+  client_uri: APP_SITE,
+  logo_uri: APP_LOGO,
+  tos_uri: APP_TOS,
+  policy_uri: APP_POLICY,
+  application_type: 'web',
+  grant_types: ['authorization_code', 'refresh_token'],
+  response_types: ['code'],
+  scope: 'atproto',
+  dpop_bound_access_tokens: true,
+  token_endpoint_auth_method: 'private_key_jwt',
+  token_endpoint_auth_signing_alg: 'ES256',
+  redirect_uris: [redirectUri.toString()],
+  jwks_uri: new URL('/jwks.json', CLIENT_METADATA_URL).toString(),
+}
 
-    const handle = (req.query.handle || '').toString() || undefined;
-    const prompt = (req.query.prompt || '').toString() || undefined;
+const client = new NodeOAuthClient({
+  clientMetadata,
+  keyset,
+  stateStore,
+  sessionStore,
+  // (Optional: requestLock can be provided for multi-instance deployments)
+})
 
-    const url = await oauth.authorize('https://bsky.social', {
-      redirectUri: callbackUrl,
-      scope: 'atproto',
-      login_hint: handle,
-      prompt, // 'consent' to force approval
-    });
+// ------------------------------
+// Express HTTP Server Setup
+// ------------------------------
+const app = express()
 
-    res.redirect(url.toString());
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'auth start failed' });
-  }
-});
+// Health check endpoint
+app.get('/', (_req, res) => res.type('text/plain').send('ok'))
 
-// OAuth callback
-app.get('/auth/callback', async (req, res) => {
-  try {
-    await ensureSchema();
-    const callbackUrl = getCallbackUrl(req);
-    const oauth = await buildClient(callbackUrl);
+// Serve public client metadata and JWKS (Bluesky OAuth server will fetch these)
+app.get('/client-metadata.json', (_req, res) => res.json(client.clientMetadata))
+app.get('/jwks.json', (_req, res) => res.json(client.jwks))
 
-    // Library reads state & code from req.url and persists the tokenSet under DID
-    await oauth.callback('https://bsky.social', req.url);
-
-    res.type('text/plain').send('OAuth complete. You can close this window.');
-  } catch (err) {
-    console.error(err);
-    res.status(400).json({ error: 'oauth callback failed' });
-  }
-});
-
-// Debug current saved sessions
+// Debug endpoint: show if we have a session stored
 app.get('/session/debug', async (_req, res) => {
-  const rows = await kv.all('oauth_sessions');
-  res.json({ haveSession: rows.length > 0, rows });
-});
+  const row = await pg.query(`SELECT sub, value, updated_at FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`)
+  res.json({ haveSession: row.rowCount > 0, session: row.rows[0] || null })
+})
 
-// Hard reset stores
-app.post('/admin/clear-session', async (_req, res) => {
-  await kv.clear('oauth_sessions');
-  await kv.clear('oauth_state');
-  res.json({ cleared: true });
-});
+// Admin endpoint: clear a session (POST with ?sub=<did> or JSON body)
+app.post('/admin/clear-session', express.json(), async (req, res) => {
+  const sub = (req.query.sub || req.body?.sub || '').toString()
+  if (!sub) return res.status(400).json({ error: 'missing sub' })
+  await sessionStore.del(sub)
+  res.json({ ok: true })
+})
 
-// Simple post test
-app.post('/post', async (req, res) => {
+// Step 1 of OAuth: start authentication (redirect user to Bluesky for login)
+app.get('/auth/start', async (req, res, next) => {
   try {
-    const callbackUrl = getCallbackUrl(req);
-    const oauth = await buildClient(callbackUrl);
-    const agent = await getAgent(oauth);
-
-    const text = (req.body?.text || '').toString().slice(0, 300) || 'hello from OAuth bot';
-    const result = await agent.post({ text });
-    res.json({ ok: true, uri: result.uri });
+    const handle = (req.query.handle || BSKY_EXPECTED_HANDLE)?.toString()
+    if (!handle) return res.status(400).send('missing ?handle')
+    const state = randomUUID()
+    // If client disconnects, abort the request to prevent hanging
+    const ac = new AbortController()
+    req.on('close', () => ac.abort())
+    // Get the Bluesky OAuth URL and redirect user to it
+    const url = await client.authorize(handle, { state, signal: ac.signal })
+    return res.redirect(url)
   } catch (err) {
-    const msg = (err?.message || '').toLowerCase();
-    if (msg.includes('no oauth session') || msg.includes('expired/cleared')) {
-      return res.status(401).json({ error: 'reauth required' });
-    }
-    console.error(err);
-    res.status(500).json({ error: 'post failed' });
+    return next(err)
   }
-});
+})
 
-app.listen(PORT, () => console.log(`web listening on :${PORT}`));
+// Step 2 of OAuth: callback for Bluesky OAuth (handles the code exchange)
+app.get('/oauth/callback', async (req, res, next) => {
+  try {
+    const params = new URLSearchParams(req.url.split('?')[1] || '')
+    const { session } = await client.callback(params)
+    // OAuth successful – session is saved in Postgres.
+    const agent = new Agent(session)
+    const profile = await agent.getProfile({ actor: agent.did }).catch(() => null)
+    res.type('text/plain').send(
+      `OAuth complete for DID: ${session.did}\n` +
+      (profile ? `Logged in as: ${profile.data.handle || profile.data.displayName}\n` : '') +
+      `You can close this window.`
+    )
+  } catch (err) {
+    return next(err)
+  }
+})
+
+// Protected endpoint: internal API to post a simple status update (text-only)
+app.post('/post', express.json(), async (req, res) => {
+  // Verify internal token
+  const token = req.get('X-Internal-Token') || ''
+  if (token !== INTERNAL_API_TOKEN) {
+    return res.status(403).json({ error: 'forbidden' })
+  }
+  const text = (req.body?.text || '').toString().trim()
+  if (!text) return res.status(400).json({ error: 'missing text' })
+  // Get the latest OAuth session from DB
+  const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`)
+  if (!row.rowCount) {
+    return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' })
+  }
+  const sub = row.rows[0].sub
+  let session
+  try {
+    session = await client.restore(sub)  // may trigger refresh if needed
+  } catch (err) {
+    console.error('Restore session failed:', err)
+    return res.status(401).json({ error: 'OAuth session expired or invalid. Visit /auth/start to reconnect.' })
+  }
+  const agent = new Agent(session)
+  try {
+    await agent.post({ text })
+    return res.json({ ok: true })
+  } catch (err) {
+    console.error('Post failed:', err)
+    return res.status(500).json({ error: 'post failed' })
+  }
+})
+
+// Protected endpoint: internal API to post a thread (two posts in a thread)
+app.post('/post-thread', express.json(), async (req, res) => {
+  // Verify internal token
+  const token = req.get('X-Internal-Token') || ''
+  if (token !== INTERNAL_API_TOKEN) {
+    return res.status(403).json({ error: 'forbidden' })
+  }
+  const firstText = (req.body?.firstText || '').toString().trim()
+  const secondText = (req.body?.secondText || '').toString().trim()
+  if (!firstText || !secondText) {
+    return res.status(400).json({ error: 'missing text' })
+  }
+  // Get the latest OAuth session
+  const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`)
+  if (!row.rowCount) {
+    return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' })
+  }
+  const sub = row.rows[0].sub
+  let session
+  try {
+    session = await client.restore(sub)
+  } catch (err) {
+    console.error('Restore session failed:', err)
+    return res.status(401).json({ error: 'OAuth session expired or invalid. Visit /auth/start to reconnect.' })
+  }
+  const agent = new Agent(session)
+  try {
+    // Create the first post
+    const firstPost = await agent.post({ text: firstText })
+    const firstUri = firstPost.uri
+    const firstCid = firstPost.cid
+    // Create the second post as a reply to the first
+    await agent.post({
+      text: secondText,
+      reply: {
+        root: { uri: firstUri, cid: firstCid },
+        parent: { uri: firstUri, cid: firstCid }
+      }
+    })
+    return res.json({ ok: true })
+  } catch (err) {
+    console.error('Post-thread failed:', err)
+    return res.status(500).json({ error: 'post-thread failed' })
+  }
+})
+
+// Global error handler (for any uncaught errors in routes)
+app.use((err, _req, res, _next) => {
+  console.error(err)
+  res.status(500).json({ error: err?.message || 'server error' })
+})
+
+// Start the server
+app.listen(PORT, () => {
+  console.log(`web listening on :${PORT}`)
+})
