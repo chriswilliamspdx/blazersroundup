@@ -186,20 +186,39 @@ app.get('/oauth/callback', async (req, res) => {
 });
 
 // --- Build a logged-in Agent from stored OAuth session ---
+// Return a DPoP-capable Bluesky Agent from the stored OAuth session
 async function getAgent() {
-  const { rows } = await pool.query('select session_json from oauth_sessions_v2 limit 1');
-  if (!rows[0]) throw new Error('No OAuth session found. Visit /auth/start first.');
-  const s = rows[0].session_json || {};
+  // Grab the most recently updated session row
+  const { rows } = await pool.query(
+    `SELECT sub, session_json
+     FROM oauth_sessions
+     ORDER BY updated_at DESC NULLS LAST, created_at DESC
+     LIMIT 1`
+  );
 
-  // Determine service origin (PDS) from session, fallback to bsky.social
-  let service = 'https://bsky.social';
-  if (s.pdsUrl) {
-    try { service = new URL(s.pdsUrl).origin; } catch {}
+  if (!rows.length) {
+    throw new Error('No OAuth session in DB');
   }
 
-  if (!s.accessJwt || !s.refreshJwt || !s.did) {
-    throw new Error('OAuth session missing accessJwt/refreshJwt/did');
+  // Pull a reliable subject identifier for restore()
+  const saved = rows[0];
+  const sub =
+    saved.sub ||
+    saved.session_json?.sub ||
+    saved.session_json?.session?.sub ||
+    saved.session_json?.did;
+
+  if (!sub) {
+    throw new Error('Stored OAuth session missing sub/did');
   }
+
+  // Let the OAuth client rebuild + refresh the session if needed
+  const oauthSession = await oauthClient.restore(sub);
+
+  // Hand the session directly to the Bluesky Agent (it knows DPoP)
+  return new Agent(oauthSession);
+}
+
 
   const agent = new Agent({ service });
 
