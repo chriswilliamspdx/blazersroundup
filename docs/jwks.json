@@ -3,10 +3,10 @@
     {
       "kty": "EC",
       "crv": "P-256",
-      "x": "Ez1yCnjapkEk4MBF5YD5DMjwOJrXCudQckhNA7wNcN0",
-      "y": "BYeXD1I70z1XCjdQ2odH-HomzVDkeuHO6AIKCdjbiMY",
+      "x": "55QntOP12hn15Ln3WLb2tuYcAI-bD2PauJ7J2d-2VJg",
+      "y": "r4REF2O5gLd_Ls3ilvAB2CIAd-wcA-EZMnaYHJBlQJg",
       "use": "sig",
-      "kid": "92552ec8-e3a8-418e-bc1e-510305695207"
+      "kid": "aa62e3f6-6ace-4b1d-a67f-8d988f70d4ad"
     }
   ]
 }
