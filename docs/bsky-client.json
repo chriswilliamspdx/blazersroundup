@@ -10,7 +10,7 @@
   "dpop_bound_access_tokens": true,
   "token_endpoint_auth_method": "private_key_jwt",
   "token_endpoint_auth_signing_alg": "ES256",
-  "jwks_uri": "https://chriswilliamspdx.github.io/blazersroundup/jwks.json?v=14",
+  "jwks_uri": "https://chriswilliamspdx.github.io/blazersroundup/jwks.json?v=15",
   "logo_uri": "https://chriswilliamspdx.github.io/blazersroundup/logo.png",
   "tos_uri": "https://chriswilliamspdx.github.io/blazersroundup/tos.html",
   "policy_uri": "https://chriswilliamspdx.github.io/blazersroundup/privacy.html"
