@@ -87,11 +87,10 @@ const signingKey = await JoseKey.fromImportable(BSKY_OAUTH_PRIVATE_KEY, BSKY_OAU
 
 const redirectUri = new URL('/oauth/callback', WEB_BASE_URL).toString()
 
-// FIX: Add `redirect_uris` to the metadata passed to the constructor.
+// The client metadata for the constructor only needs public information.
+// The library will fetch the full details from the client_id URL.
 const clientMetadata = {
   client_id: CLIENT_METADATA_URL,
-  redirect_uris: [redirectUri],
-  scope: 'atproto',
 }
 
 const client = new NodeOAuthClient({
