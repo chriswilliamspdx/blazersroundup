@@ -2,10 +2,11 @@
 import express from 'express'
 import { Pool } from 'pg'
 import { randomUUID } from 'node:crypto'
-import { NodeOAuthClient } from '@atproto/oauth-client-node'
+// FIX: Correctly import both the default and MemoryLock from the library
+import pkg from '@atproto/oauth-client-node'
+const { NodeOAuthClient, MemoryLock } = pkg
 import { JoseKey } from '@atproto/jwk-jose'
 import { Agent } from '@atproto/api'
-import { MemoryLock } from '@atproto/oauth-client-node' // FIX: Import MemoryLock to fix the warning
 
 // ------------------------------
 // Env Variables
