@@ -2,7 +2,6 @@
 import express from 'express'
 import { Pool } from 'pg'
 import { randomUUID } from 'node:crypto'
-// FIX: Correctly import both the default and MemoryLock from the library
 import pkg from '@atproto/oauth-client-node'
 const { NodeOAuthClient } = pkg
 import { JoseKey } from '@atproto/jwk-jose'
@@ -22,8 +21,6 @@ const {
   INTERNAL_API_TOKEN,
 } = process.env
 
-// ... (keep all the env checks and Postgres setup the same)
-
 if (!DATABASE_URL) throw new Error('Missing DATABASE_URL')
 if (!CLIENT_METADATA_URL) throw new Error('Missing CLIENT_METADATA_URL (URL to /bsky-client.json)')
 if (!WEB_BASE_URL) throw new Error('Missing WEB_BASE_URL (the public URL of this Railway service)')
@@ -31,6 +28,9 @@ if (!BSKY_OAUTH_PRIVATE_KEY) throw new Error('Missing BSKY_OAUTH_PRIVATE_KEY (yo
 if (!BSKY_OAUTH_KID) throw new Error('Missing BSKY_OAUTH_KID')
 if (!INTERNAL_API_TOKEN) throw new Error('Missing INTERNAL_API_TOKEN')
 
+// ------------------------------
+// Postgres Setup
+// ------------------------------
 const pg = new Pool({ connectionString: DATABASE_URL })
 
 await pg.query(`
@@ -80,14 +80,12 @@ const sessionStore = {
   },
 }
 
-
 // ------------------------------
 // OAuth Client Setup
 // ------------------------------
-
-// Import the private key, this will be used for signing assertions
+// FIX: Revert to the original, stable initialization logic
 const signingKey = await JoseKey.fromImportable(BSKY_OAUTH_PRIVATE_KEY, BSKY_OAUTH_KID)
-
+const keyset = [signingKey]
 const redirectUri = new URL('/oauth/callback', WEB_BASE_URL).toString()
 
 const clientMetadata = {
@@ -95,21 +93,24 @@ const clientMetadata = {
   redirect_uris: [redirectUri],
   token_endpoint_auth_method: 'private_key_jwt',
   token_endpoint_auth_signing_alg: 'ES256',
-  scope: 'atproto',
-  // FIX: Add the jwks_uri so the client can find the public key
-  jwks_uri: new URL('jwks.json', CLIENT_METADATA_URL).toString(),
+  // The client will fetch the rest of the metadata from the URL
 }
 
 const client = new NodeOAuthClient({
   clientMetadata,
+  keyset,
   stateStore,
   sessionStore,
 })
 
 const app = express()
 
-// ... (the rest of the file remains the same)
+// ------------------------------
+// Routes
+// ------------------------------
+
 app.get('/', (_req, res) => res.type('text/plain').send('ok'))
+
 app.get('/session/debug', async (_req, res) => {
   const row = await pg.query(`SELECT sub, value, updated_at FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`)
   res.json({ haveSession: row.rowCount > 0, session: row.rows[0] || null })
@@ -124,7 +125,7 @@ app.get('/auth/start', async (req, res, next) => {
     const ac = new AbortController()
     req.on('close', () => ac.abort())
     
-    const url = await client.authorize(handle, { state, signal: ac.signal, signingKey })
+    const url = await client.authorize(handle, { state, signal: ac.signal })
     return res.redirect(url)
   } catch (err) {
     return next(err)
@@ -134,7 +135,7 @@ app.get('/auth/start', async (req, res, next) => {
 app.get('/oauth/callback', async (req, res, next) => {
   try {
     const params = new URLSearchParams(req.url.split('?')[1] || '')
-    const { session } = await client.callback(params, { signingKey })
+    const { session } = await client.callback(params)
 
     const agent = new Agent(session)
     const profile = await agent.getProfile({ actor: agent.did }).catch(() => null)
@@ -166,7 +167,7 @@ app.post('/post-thread', express.json(), async (req, res, next) => {
       return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' })
     }
     
-    const session = await client.restore(row.rows[0].sub, { signingKey })
+    const session = await client.restore(row.rows[0].sub)
     const agent = new Agent(session)
     
     const firstPost = await agent.post({ text: firstText })
