@@ -97,6 +97,7 @@ const clientMetadata = {
 
 const client = new NodeOAuthClient({
   clientMetadata,
+  keyset: [signingKey],
   stateStore,
   sessionStore,
 })
