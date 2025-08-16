@@ -2,7 +2,6 @@ import express from 'express';
 import bodyParser from 'body-parser';
 import cors from 'cors';
 import { Pool } from 'pg';
-// oauth-client is CJS
 import oauthPkg from '@atproto/oauth-client';
 const { OAuthClient } = oauthPkg;
 
@@ -48,37 +47,63 @@ async function ensureSchema() {
 }
 await ensureSchema();
 
-// ---- Load private key (JWK preferred) ----
+// ---- Load private key (JWK preferred), with clear diagnostics ----
 let keyImportable = null;
-if (BSKY_OAUTH_PRIVATE_KEY_JWK) {
+let keySource = 'none';
+
+if (BSKY_OAUTH_PRIVATE_KEY_JWK && BSKY_OAUTH_PRIVATE_KEY_JWK.trim()) {
+  keySource = 'JWK';
   let jwk;
   try {
     jwk = JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK);
-    if (jwk.keys && Array.isArray(jwk.keys)) jwk = jwk.keys[0]; // guard if a JWKS was pasted
   } catch {
-    die('BSKY_OAUTH_PRIVATE_KEY_JWK is not valid JSON.');
+    die('BSKY_OAUTH_PRIVATE_KEY_JWK is not valid JSON. Paste the **PRIVATE JWK (JSON)** printed by the generator (not the public JWKS).');
   }
-  // Validate: must be private OKP Ed25519 (has "d")
+  // If someone pasted a JWKS, unwrap the first key
+  if (jwk && typeof jwk === 'object' && Array.isArray(jwk.keys)) {
+    console.warn('BSKY_OAUTH_PRIVATE_KEY_JWK looks like a JWKS set; using keys[0].');
+    jwk = jwk.keys[0];
+  }
+  // Show a safe summary of what we received
+  const summary = {
+    type: typeof jwk,
+    kty: jwk?.kty,
+    crv: jwk?.crv,
+    has_d: !!jwk?.d,
+    kid_type: typeof jwk?.kid,
+  };
+  console.log('Loaded JWK summary:', summary);
+
+  if (!jwk || typeof jwk !== 'object') die('Private JWK must be a JSON object.');
   if (jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519') {
-    die(`Private JWK must be OKP/Ed25519. Got kty=${jwk.kty}, crv=${jwk.crv}`);
+    die(`Private JWK must be OKP/Ed25519. Got kty=${jwk.kty}, crv=${jwk.crv}. Did you paste the public JWKS or an EC key by mistake?`);
   }
-  if (!jwk.d) die('Private JWK is missing "d" (it is public only). Use the PRIVATE JWK printed by the generator.');
+  if (!jwk.d) die('Private JWK is missing "d" (that means you pasted a **public** key; paste the PRIVATE JWK).');
+  if (typeof jwk.kid !== 'string') {
+    console.warn('Private JWK "kid" is not a string; setting it from BSKY_OAUTH_KID.');
+    jwk.kid = BSKY_OAUTH_KID;
+  }
+  if (jwk.kid !== BSKY_OAUTH_KID) {
+    console.warn(`Private JWK kid (${jwk.kid}) != env BSKY_OAUTH_KID (${BSKY_OAUTH_KID}); using env kid.`);
+    jwk.kid = BSKY_OAUTH_KID;
+  }
   keyImportable = jwk;
-  console.log('Loaded private key from JWK (OKP/Ed25519).');
-} else if (BSKY_OAUTH_PRIVATE_KEY_PEM) {
+} else if (BSKY_OAUTH_PRIVATE_KEY_PEM && BSKY_OAUTH_PRIVATE_KEY_PEM.trim()) {
+  keySource = 'PEM';
   const pem = BSKY_OAUTH_PRIVATE_KEY_PEM.replace(/\r\n/g, '\n').replace(/\\n/g, '\n').trim();
   if (!pem.includes('-----BEGIN PRIVATE KEY-----') || !pem.includes('-----END PRIVATE KEY-----')) {
-    die('BSKY_OAUTH_PRIVATE_KEY_PEM does not look like a PKCS8 PEM.');
+    die('BSKY_OAUTH_PRIVATE_KEY_PEM does not look like a PKCS8 PEM (must include BEGIN/END PRIVATE KEY).');
   }
+  console.log('Loaded PEM (PKCS8).');
   keyImportable = pem;
-  console.log('Loaded private key from PEM.');
 } else {
   die('Provide either BSKY_OAUTH_PRIVATE_KEY_JWK (recommended) or BSKY_OAUTH_PRIVATE_KEY_PEM.');
 }
 
 const keyset = [ await JoseKey.fromImportable(keyImportable, { kid: BSKY_OAUTH_KID }) ];
+console.log(`Private key imported from ${keySource}. kid=${BSKY_OAUTH_KID}`);
 
-// Use client metadata from your Pages URL
+// Use full client metadata from URL
 const oauth = new OAuthClient({
   responseMode: 'query',
   clientMetadataUrl: CLIENT_METADATA_URL,
@@ -169,3 +194,4 @@ app.post('/post-thread', async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`web listening on :${PORT}`));
+
