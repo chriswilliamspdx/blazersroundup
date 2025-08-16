@@ -83,22 +83,18 @@ const sessionStore = {
 // ------------------------------
 // OAuth Client Setup
 // ------------------------------
-// FIX: Revert to the original, stable initialization logic
-const signingKey = await JoseKey.fromImportable(BSKY_OAUTH_PRIVATE_KEY, BSKY_OAUTH_KID)
-const keyset = [signingKey]
-const redirectUri = new URL('/oauth/callback', WEB_BASE_URL).toString()
 
+// The private key is imported for signing, but NOT passed to the constructor.
+const signingKey = await JoseKey.fromImportable(BSKY_OAUTH_PRIVATE_KEY, BSKY_OAUTH_KID)
+
+// The client metadata for the constructor only needs public information.
+// The library will fetch the full details from the client_id URL.
 const clientMetadata = {
   client_id: CLIENT_METADATA_URL,
-  redirect_uris: [redirectUri],
-  token_endpoint_auth_method: 'private_key_jwt',
-  token_endpoint_auth_signing_alg: 'ES256',
-  // The client will fetch the rest of the metadata from the URL
 }
 
 const client = new NodeOAuthClient({
   clientMetadata,
-  keyset,
   stateStore,
   sessionStore,
 })
@@ -125,7 +121,8 @@ app.get('/auth/start', async (req, res, next) => {
     const ac = new AbortController()
     req.on('close', () => ac.abort())
     
-    const url = await client.authorize(handle, { state, signal: ac.signal })
+    // The private signingKey is passed here, only when needed.
+    const url = await client.authorize(handle, { state, signal: ac.signal, signingKey })
     return res.redirect(url)
   } catch (err) {
     return next(err)
@@ -134,8 +131,11 @@ app.get('/auth/start', async (req, res, next) => {
 
 app.get('/oauth/callback', async (req, res, next) => {
   try {
+    const redirectUri = new URL('/oauth/callback', WEB_BASE_URL).toString()
     const params = new URLSearchParams(req.url.split('?')[1] || '')
-    const { session } = await client.callback(params)
+
+    // The private signingKey is passed here, only when needed.
+    const { session } = await client.callback(params, { redirectUri, signingKey })
 
     const agent = new Agent(session)
     const profile = await agent.getProfile({ actor: agent.did }).catch(() => null)
@@ -167,7 +167,8 @@ app.post('/post-thread', express.json(), async (req, res, next) => {
       return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' })
     }
     
-    const session = await client.restore(row.rows[0].sub)
+    // The private signingKey is passed here, only when needed.
+    const session = await client.restore(row.rows[0].sub, { signingKey })
     const agent = new Agent(session)
     
     const firstPost = await agent.post({ text: firstText })
