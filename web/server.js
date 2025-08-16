@@ -1,37 +1,38 @@
 // web/server.js (ESM) - Bluesky OAuth + Posting API
-import express from 'express'
-import { Pool } from 'pg'
-import { randomUUID } from 'node:crypto'
-import pkg from '@atproto/oauth-client-node'
-const { NodeOAuthClient } = pkg
-import { JoseKey } from '@atproto/jwk-jose'
-import { Agent } from '@atproto/api'
+import express from 'express';
+import { Pool } from 'pg';
+import { randomUUID } from 'node:crypto';
+import pkg from '@atproto/oauth-client-node';
+const { NodeOAuthClient } = pkg;
+import { JoseKey } from '@atproto/jwk-jose';
+import { Agent } from '@atproto/api';
 
 // ------------------------------
 // Env Variables
 // ------------------------------
+// FIX: Reverted to use BSKY_OAUTH_PRIVATE_KEY_JWK to match the working example.
 const {
   PORT = 8080,
   DATABASE_URL,
   CLIENT_METADATA_URL,
   WEB_BASE_URL,
-  BSKY_OAUTH_PRIVATE_KEY,
+  BSKY_OAUTH_PRIVATE_KEY_JWK, // Using the specific _JWK variable from your working code
   BSKY_OAUTH_KID,
   BSKY_EXPECTED_HANDLE,
   INTERNAL_API_TOKEN,
-} = process.env
+} = process.env;
 
-if (!DATABASE_URL) throw new Error('Missing DATABASE_URL')
-if (!CLIENT_METADATA_URL) throw new Error('Missing CLIENT_METADATA_URL (URL to /bsky-client.json)')
-if (!WEB_BASE_URL) throw new Error('Missing WEB_BASE_URL (the public URL of this Railway service)')
-if (!BSKY_OAUTH_PRIVATE_KEY) throw new Error('Missing BSKY_OAUTH_PRIVATE_KEY (your private key PEM or JWK)')
-if (!BSKY_OAUTH_KID) throw new Error('Missing BSKY_OAUTH_KID')
-if (!INTERNAL_API_TOKEN) throw new Error('Missing INTERNAL_API_TOKEN')
+if (!DATABASE_URL) throw new Error('Missing DATABASE_URL');
+if (!CLIENT_METADATA_URL) throw new Error('Missing CLIENT_METADATA_URL');
+if (!WEB_BASE_URL) throw new Error('Missing WEB_BASE_URL');
+if (!BSKY_OAUTH_PRIVATE_KEY_JWK) throw new Error('Missing BSKY_OAUTH_PRIVATE_KEY_JWK');
+if (!BSKY_OAUTH_KID) throw new Error('Missing BSKY_OAUTH_KID');
+if (!INTERNAL_API_TOKEN) throw new Error('Missing INTERNAL_API_TOKEN');
 
 // ------------------------------
 // Postgres Setup
 // ------------------------------
-const pg = new Pool({ connectionString: DATABASE_URL })
+const pg = new Pool({ connectionString: DATABASE_URL });
 
 await pg.query(`
 CREATE TABLE IF NOT EXISTS oauth_state (
@@ -44,7 +45,7 @@ CREATE TABLE IF NOT EXISTS oauth_sessions (
   value      JSONB NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-`)
+`);
 
 const stateStore = {
   async set(key, internalState) {
@@ -52,16 +53,16 @@ const stateStore = {
       `INSERT INTO oauth_state(key, value) VALUES ($1, $2)
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
       [key, internalState],
-    )
+    );
   },
   async get(key) {
-    const res = await pg.query(`SELECT value FROM oauth_state WHERE key = $1`, [key])
-    return res.rows[0]?.value
+    const res = await pg.query(`SELECT value FROM oauth_state WHERE key = $1`, [key]);
+    return res.rows[0]?.value;
   },
   async del(key) {
-    await pg.query(`DELETE FROM oauth_state WHERE key = $1`, [key])
+    await pg.query(`DELETE FROM oauth_state WHERE key = $1`, [key]);
   },
-}
+};
 const sessionStore = {
   async set(sub, sessionData) {
     await pg.query(
@@ -69,133 +70,122 @@ const sessionStore = {
        VALUES ($1, $2, now())
        ON CONFLICT (sub) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
       [sub, sessionData],
-    )
+    );
   },
   async get(sub) {
-    const res = await pg.query(`SELECT value FROM oauth_sessions WHERE sub = $1`, [sub])
-    return res.rows[0]?.value
+    const res = await pg.query(`SELECT value FROM oauth_sessions WHERE sub = $1`, [sub]);
+    return res.rows[0]?.value;
   },
   async del(sub) {
-    await pg.query(`DELETE FROM oauth_sessions WHERE sub = $1`, [sub])
+    await pg.query(`DELETE FROM oauth_sessions WHERE sub = $1`, [sub]);
   },
-}
+};
 
 // ------------------------------
 // OAuth Client Setup
 // ------------------------------
-const signingKey = await JoseKey.fromImportable(BSKY_OAUTH_PRIVATE_KEY, BSKY_OAUTH_KID)
+// FIX: Reverting to the exact initialization logic from your working example.
+const keyJwk = JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK);
+const signingKey = await JoseKey.fromImportable(keyJwk, BSKY_OAUTH_KID);
 
-const redirectUri = new URL('/oauth/callback', WEB_BASE_URL).toString()
+// Fetch the public metadata from the URL
+const clientMetadataResponse = await fetch(CLIENT_METADATA_URL);
+const clientMetadata = await clientMetadataResponse.json();
 
-const clientMetadata = {
-  client_id: CLIENT_METADATA_URL,
-  redirect_uris: [redirectUri],
-  token_endpoint_auth_method: 'private_key_jwt',
-  scope: 'atproto',
-  token_endpoint_auth_signing_alg: 'ES256',
-}
-
-// FIX: Corrected a typo in the class name `NodeOAuth-Client` to `NodeOAuthClient`.
 const client = new NodeOAuthClient({
   clientMetadata,
   keyset: [signingKey],
   stateStore,
   sessionStore,
-})
+});
 
-const app = express()
+const app = express();
+app.use(express.json()); // Middleware to parse JSON bodies
 
 // ------------------------------
 // Routes
 // ------------------------------
-app.get('/', (_req, res) => res.type('text/plain').send('ok'))
+app.get('/', (_req, res) => res.type('text/plain').send('ok'));
 
 app.get('/session/debug', async (_req, res) => {
-  const row = await pg.query(`SELECT sub, value, updated_at FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`)
-  res.json({ haveSession: row.rowCount > 0, session: row.rows[0] || null })
-})
+  const row = await pg.query(`SELECT sub, value, updated_at FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
+  res.json({ haveSession: row.rowCount > 0, session: row.rows[0] || null });
+});
 
 app.get('/auth/start', async (req, res, next) => {
   try {
-    const handle = (req.query.handle || BSKY_EXPECTED_HANDLE)?.toString()
-    if (!handle) return res.status(400).send('missing ?handle')
+    const handle = (req.query.handle || BSKY_EXPECTED_HANDLE)?.toString();
+    if (!handle) return res.status(400).send('missing ?handle');
     
-    const state = randomUUID()
-    const ac = new AbortController()
-    req.on('close', () => ac.abort())
-    
-    const url = await client.authorize(handle, { state, signal: ac.signal })
-    return res.redirect(url)
+    const url = await client.authorize(handle);
+    return res.redirect(url);
   } catch (err) {
-    return next(err)
+    return next(err);
   }
-})
+});
 
 app.get('/oauth/callback', async (req, res, next) => {
   try {
-    const callbackUrl = new URL(req.url, WEB_BASE_URL)
-    const session = await client.validateCallback(callbackUrl, { signingKey })
+    const params = new URLSearchParams(req.url.split('?')[1] || '');
+    const { session } = await client.callback(params);
 
-    const agent = new Agent({ service: 'https://bsky.social', session })
-    const profile = await agent.getProfile({ actor: session.did }).catch(() => null)
+    const agent = new Agent({ service: 'https://bsky.social', ...session });
+    const profile = await agent.getProfile({ actor: session.did }).catch(() => null);
     
     res.type('text/plain').send(
       `✅ SUCCESS! OAuth complete for DID: ${session.did}\n` +
       (profile ? `Logged in as: ${profile.data.handle}\n` : '') +
       `You can now close this window. The bot is authorized.`
-    )
+    );
   } catch (err) {
-    return next(err)
+    return next(err);
   }
-})
+});
 
-app.post('/post-thread', express.json(), async (req, res, next) => {
+app.post('/post-thread', async (req, res, next) => {
   try {
-    const token = req.get('X-Internal-Token') || ''
+    const token = req.get('X-Internal-Token') || '';
     if (token !== INTERNAL_API_TOKEN) {
-      return res.status(403).json({ error: 'forbidden' })
+      return res.status(403).json({ error: 'forbidden' });
     }
     
-    const { firstText, secondText } = req.body
+    const { firstText, secondText } = req.body;
     if (!firstText || !secondText) {
-      return res.status(400).json({ error: 'missing firstText or secondText' })
+      return res.status(400).json({ error: 'missing firstText or secondText' });
     }
     
-    const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`)
+    const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
     if (!row.rowCount) {
-      return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' })
+      return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
     }
     
-    const session = await client.restore(row.rows[0].sub)
-    const agent = new Agent(session)
+    const session = await client.restore(row.rows[0].sub);
+    const agent = new Agent({ service: 'https://bsky.social', ...session });
     
-    const firstPost = await agent.post({ text: firstText })
+    const firstPost = await agent.post({ text: firstText });
     await agent.post({
       text: secondText,
       reply: {
         root: firstPost,
         parent: firstPost
       }
-    })
+    });
     
-    return res.json({ ok: true })
+    return res.json({ ok: true });
   } catch(err) {
-    next(err)
+    next(err);
   }
-})
+});
 
 app.use((err, _req, res, _next) => {
-  console.error('--- unhandled error ---')
-  console.error(err)
+  console.error('--- unhandled error ---');
+  console.error(err);
   res.status(500).json({ 
     error: err.name || 'ServerError',
     message: err.message,
-  })
-})
+  });
+});
 
 app.listen(PORT, () => {
-  console.log(`web listening on :${PORT}`)
-})
-app.listen(PORT, () => {
-  console.log(`web listening on :${PORT}`)
-})
+  console.log(`web listening on :${PORT}`);
+});
