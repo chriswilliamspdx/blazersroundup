@@ -94,10 +94,10 @@ const clientMetadata = await clientMetadataResponse.json();
 
 const client = new NodeOAuthClient({
   clientMetadata,
-  keyset: [signingKey],
+  // keyset: [signingKey], // Do not pass the private key to the constructor
   stateStore,
   sessionStore,
-});
+})
 
 const app = express();
 app.use(express.json()); // Middleware to parse JSON bodies
