@@ -12,12 +12,12 @@ import { Agent } from '@atproto/api';
 // Env
 const {
   DATABASE_URL,
-  CLIENT_METADATA_URL,          // e.g. https://chriswilliamspdx.github.io/blazersroundup/bsky-client.json
-  BSKY_OAUTH_PRIVATE_KEY_JWK,   // private EC/P-256 JWK (with "d") OR:
-  BSKY_OAUTH_PRIVATE_KEY_PEM,   // PKCS8 private key (BEGIN/END PRIVATE KEY)
-  BSKY_OAUTH_KID,               // optional kid override if your JWK has no kid
-  INTERNAL_API_TOKEN,           // shared secret for protected endpoints
-  BSKY_EXPECTED_HANDLE,         // optional safety check, e.g. @blazersroundup.bsky.social
+  CLIENT_METADATA_URL,          // ex: https://chriswilliamspdx.github.io/blazersroundup/bsky-client.json
+  BSKY_OAUTH_PRIVATE_KEY_JWK,   // private EC/P-256 JWK (must include "d"), or:
+  BSKY_OAUTH_PRIVATE_KEY_PEM,   // PKCS8 private key
+  BSKY_OAUTH_KID,               // optional kid override
+  INTERNAL_API_TOKEN,           // required for admin + post routes
+  BSKY_EXPECTED_HANDLE,         // optional safety check
   PORT = 8080,
 } = process.env;
 
@@ -65,7 +65,7 @@ if (BSKY_OAUTH_PRIVATE_KEY_JWK && BSKY_OAUTH_PRIVATE_KEY_JWK.trim()) {
     die('BSKY_OAUTH_PRIVATE_KEY_JWK is not valid JSON.');
   }
 
-  // If a JWKS was pasted, use the first key
+  // If JWKS was pasted, use first key
   if (jwk && typeof jwk === 'object' && Array.isArray(jwk.keys)) {
     console.warn('Detected JWKS; using keys[0].');
     jwk = jwk.keys[0];
@@ -81,7 +81,7 @@ if (BSKY_OAUTH_PRIVATE_KEY_JWK && BSKY_OAUTH_PRIVATE_KEY_JWK.trim()) {
 
   if (!jwk || typeof jwk !== 'object') die('Private JWK must be a JSON object.');
   if (jwk.kty !== 'EC' || jwk.crv !== 'P-256') die(`Private JWK must be EC/P-256. Got kty=${jwk.kty}, crv=${jwk.crv}.`);
-  if (!jwk.d) die('Private JWK is missing "d" — you pasted a PUBLIC key.');
+  if (!jwk.d) die('Private JWK missing "d" (you pasted a PUBLIC key).');
   if (typeof jwk.kid === 'string') jwkKid = jwk.kid;
   else if (BSKY_OAUTH_KID) { jwk.kid = BSKY_OAUTH_KID; jwkKid = BSKY_OAUTH_KID; }
 
@@ -305,8 +305,8 @@ app.get('/session/debug', async (_req, res) => {
   res.json({ haveSession: !!rows[0], row: rows[0] ?? null });
 });
 
-// --- ONE-TIME DB MIGRATION (protected) ---
-// Call with header: x-internal-token: <INTERNAL_API_TOKEN>
+// --- ONE-TIME DB MIGRATION (safe) ---
+// Adds/repairs columns + index without dropping anything.
 app.post('/admin/migrate', async (req, res) => {
   try {
     const token = req.headers['x-internal-token'];
@@ -330,7 +330,51 @@ app.post('/admin/migrate', async (req, res) => {
        WHERE sub IS NULL;
 
       CREATE UNIQUE INDEX IF NOT EXISTS oauth_sessions_sub_unique ON oauth_sessions(sub);
+    `);
 
+    res.json({ ok: true, message: 'migration complete' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+// --- HARD MIGRATION (fix legacy NOT NULL and extra columns) ---
+// Use if you still see errors like "column did ... violates not-null constraint".
+app.post('/admin/migrate-hard', async (req, res) => {
+  try {
+    const token = req.headers['x-internal-token'];
+    if (token !== INTERNAL_API_TOKEN) return res.status(401).json({ error: 'unauthorized' });
+
+    await pool.query(`
+      -- Ensure minimal schema we expect
+      CREATE TABLE IF NOT EXISTS oauth_sessions (
+        sub          text,
+        session_json jsonb,
+        created_at   timestamptz DEFAULT now(),
+        updated_at   timestamptz DEFAULT now()
+      );
+
+      ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS sub          text;
+      ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS session_json jsonb;
+      ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS created_at   timestamptz DEFAULT now();
+      ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS updated_at   timestamptz DEFAULT now();
+
+      -- Backfill sub from any stored JSON
+      UPDATE oauth_sessions
+         SET sub = COALESCE(sub, session_json->>'sub', session_json->>'did', sub)
+       WHERE sub IS NULL;
+
+      -- Remove legacy columns that can block inserts (NOT NULL, etc.)
+      ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS did;
+      ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS access_jwt;
+      ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS refresh_jwt;
+      ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS handle;
+
+      -- Final model: sub as the unique identity key
+      CREATE UNIQUE INDEX IF NOT EXISTS oauth_sessions_sub_unique ON oauth_sessions(sub);
+
+      -- State table (used by OAuth flow)
       CREATE TABLE IF NOT EXISTS oauth_state (
         k text PRIMARY KEY,
         v jsonb NOT NULL,
@@ -338,7 +382,7 @@ app.post('/admin/migrate', async (req, res) => {
       );
     `);
 
-    res.json({ ok: true, message: 'migration complete' });
+    res.json({ ok: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: String(err.message || err) });
