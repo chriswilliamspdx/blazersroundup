@@ -87,17 +87,18 @@ const signingKey = await JoseKey.fromImportable(BSKY_OAUTH_PRIVATE_KEY, BSKY_OAU
 
 const redirectUri = new URL('/oauth/callback', WEB_BASE_URL).toString()
 
-// The client metadata for the constructor needs the public information.
 const clientMetadata = {
   client_id: CLIENT_METADATA_URL,
   redirect_uris: [redirectUri],
   token_endpoint_auth_method: 'private_key_jwt',
   scope: 'atproto',
+  token_endpoint_auth_signing_alg: 'ES256',
 }
 
-const client = new NodeOAuth-Client({
+// FIX: Corrected a typo in the class name `NodeOAuth-Client` to `NodeOAuthClient`.
+const client = new NodeOAuthClient({
   clientMetadata,
-  // keyset: [signingKey], // Do not pass the private key to the constructor
+  keyset: [signingKey],
   stateStore,
   sessionStore,
 })
@@ -123,7 +124,7 @@ app.get('/auth/start', async (req, res, next) => {
     const ac = new AbortController()
     req.on('close', () => ac.abort())
     
-    const url = await client.authorize(handle, { state, signal: ac.signal, signingKey })
+    const url = await client.authorize(handle, { state, signal: ac.signal })
     return res.redirect(url)
   } catch (err) {
     return next(err)
@@ -133,8 +134,7 @@ app.get('/auth/start', async (req, res, next) => {
 app.get('/oauth/callback', async (req, res, next) => {
   try {
     const params = new URLSearchParams(req.url.split('?')[1] || '')
-
-    const { session } = await client.callback(params, { redirectUri, signingKey })
+    const { session } = await client.callback(params)
 
     const agent = new Agent(session)
     const profile = await agent.getProfile({ actor: agent.did }).catch(() => null)
@@ -166,7 +166,7 @@ app.post('/post-thread', express.json(), async (req, res, next) => {
       return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' })
     }
     
-    const session = await client.restore(row.rows[0].sub, { signingKey })
+    const session = await client.restore(row.rows[0].sub)
     const agent = new Agent(session)
     
     const firstPost = await agent.post({ text: firstText })
@@ -193,6 +193,9 @@ app.use((err, _req, res, _next) => {
   })
 })
 
+app.listen(PORT, () => {
+  console.log(`web listening on :${PORT}`)
+})
 app.listen(PORT, () => {
   console.log(`web listening on :${PORT}`)
 })
