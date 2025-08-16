@@ -7,7 +7,7 @@
   "response_types": ["code"],
   "scope": "atproto",
   "redirect_uris": ["https://blazersroundup-production.up.railway.app/oauth/callback",
-  "http://localhost:8080/oauth/callback"],
+  "http://127.0.0.1:8080/oauth/callback"],
   "dpop_bound_access_tokens": true,
   "token_endpoint_auth_method": "private_key_jwt",
   "token_endpoint_auth_signing_alg": "ES256",
