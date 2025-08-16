@@ -4,7 +4,7 @@ import { Pool } from 'pg'
 import { randomUUID } from 'node:crypto'
 // FIX: Correctly import both the default and MemoryLock from the library
 import pkg from '@atproto/oauth-client-node'
-const { NodeOAuthClient, MemoryLock } = pkg
+const { NodeOAuthClient } = pkg
 import { JoseKey } from '@atproto/jwk-jose'
 import { Agent } from '@atproto/api'
 
@@ -102,7 +102,6 @@ const client = new NodeOAuthClient({
   clientMetadata,
   stateStore,
   sessionStore,
-  lock: new MemoryLock('oauth'), // FIX: Add a lock to resolve the warning
 })
 
 const app = express()
