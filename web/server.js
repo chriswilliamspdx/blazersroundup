@@ -83,14 +83,14 @@ const sessionStore = {
 // ------------------------------
 // OAuth Client Setup
 // ------------------------------
-
-// The private key is imported for signing, but NOT passed to the constructor.
 const signingKey = await JoseKey.fromImportable(BSKY_OAUTH_PRIVATE_KEY, BSKY_OAUTH_KID)
 
-// The client metadata for the constructor only needs public information.
-// The library will fetch the full details from the client_id URL.
+const redirectUri = new URL('/oauth/callback', WEB_BASE_URL).toString()
+
+// FIX: Add `redirect_uris` to the metadata passed to the constructor.
 const clientMetadata = {
   client_id: CLIENT_METADATA_URL,
+  redirect_uris: [redirectUri],
 }
 
 const client = new NodeOAuthClient({
@@ -104,7 +104,6 @@ const app = express()
 // ------------------------------
 // Routes
 // ------------------------------
-
 app.get('/', (_req, res) => res.type('text/plain').send('ok'))
 
 app.get('/session/debug', async (_req, res) => {
@@ -121,7 +120,6 @@ app.get('/auth/start', async (req, res, next) => {
     const ac = new AbortController()
     req.on('close', () => ac.abort())
     
-    // The private signingKey is passed here, only when needed.
     const url = await client.authorize(handle, { state, signal: ac.signal, signingKey })
     return res.redirect(url)
   } catch (err) {
@@ -131,10 +129,8 @@ app.get('/auth/start', async (req, res, next) => {
 
 app.get('/oauth/callback', async (req, res, next) => {
   try {
-    const redirectUri = new URL('/oauth/callback', WEB_BASE_URL).toString()
     const params = new URLSearchParams(req.url.split('?')[1] || '')
 
-    // The private signingKey is passed here, only when needed.
     const { session } = await client.callback(params, { redirectUri, signingKey })
 
     const agent = new Agent(session)
@@ -167,7 +163,6 @@ app.post('/post-thread', express.json(), async (req, res, next) => {
       return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' })
     }
     
-    // The private signingKey is passed here, only when needed.
     const session = await client.restore(row.rows[0].sub, { signingKey })
     const agent = new Agent(session)
     
