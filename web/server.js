@@ -213,6 +213,21 @@ app.get('/oauth/callback', async (req, res) => {
   }
 });
 
+// ---------- Helpers ----------
+function linkFacets(text) {
+  const spans = [];
+  const re = /https?:\/\/\S+/g;
+  let m;
+  while ((m = re.exec(text))) spans.push({ start: m.index, end: m.index + m[0].length, url: m[0] });
+  return spans.map((s) => ({
+    index: {
+      byteStart: Buffer.byteLength(text.slice(0, s.start), 'utf8'),
+      byteEnd: Buffer.byteLength(text.slice(0, s.end), 'utf8'),
+    },
+    features: [{ $type: 'app.bsky.richtext.facet#link', uri: s.url }],
+  }));
+}
+
 async function getAgent() {
   const { rows } = await pool.query(
     `SELECT sub, session_json
@@ -231,33 +246,32 @@ async function getAgent() {
 
   if (!sub) throw new Error('Stored OAuth session missing "sub"');
 
-  const live = await oauth.restore(sub);
+  let live;
+  try {
+    // This can throw TokenRefreshError if the row vanished mid-refresh
+    live = await oauth.restore(sub);
+  } catch (e) {
+    const msg = String(e?.message || '');
+    if (e?.name === 'TokenRefreshError' || /deleted by another process/i.test(msg)) {
+      // Defensive: purge any partial row and ask user to re-auth
+      await pool.query('DELETE FROM oauth_sessions WHERE sub=$1', [sub]);
+      throw new Error('OAuth session expired/cleared. Visit /auth/start to reconnect.');
+    }
+    throw e;
+  }
 
   let service = 'https://bsky.social';
   if (live?.pdsUrl) {
     try { service = new URL(live.pdsUrl).origin; } catch {}
   }
-
   const agent = new Agent({ service, auth: live });
   if (typeof agent.assertAuthenticated === 'function') agent.assertAuthenticated();
   return agent;
 }
 
-function linkFacets(text) {
-  const spans = [];
-  const re = /https?:\/\/\S+/g;
-  let m;
-  while ((m = re.exec(text))) spans.push({ start: m.index, end: m.index + m[0].length, url: m[0] });
-  return spans.map((s) => ({
-    index: {
-      byteStart: Buffer.byteLength(text.slice(0, s.start), 'utf8'),
-      byteEnd: Buffer.byteLength(text.slice(0, s.end), 'utf8'),
-    },
-    features: [{ $type: 'app.bsky.richtext.facet#link', uri: s.url }],
-  }));
-}
+// ---------- Protected endpoints ----------
 
-// Protected posting endpoint
+// post a two-message thread
 app.post('/post-thread', async (req, res) => {
   try {
     const token = req.headers['x-internal-token'];
@@ -283,11 +297,13 @@ app.post('/post-thread', async (req, res) => {
     res.json({ ok: true, first, reply });
   } catch (e) {
     console.error(e);
-    res.status(500).json({ error: 'post failed' });
+    const msg = /OAuth session expired\/cleared/.test(String(e)) ? 'reauth required' : 'post failed';
+    res.status(500).json({ error: msg });
   }
 });
 
-// Debug
+// ---------- Debug & Admin ----------
+
 app.get('/session/debug', async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT sub, (session_json->>'handle') AS handle, updated_at
@@ -298,17 +314,13 @@ app.get('/session/debug', async (_req, res) => {
   res.json({ haveSession: !!rows[0], row: rows[0] ?? null });
 });
 
-// -------- Admin migrations --------
-
-// Drop legacy columns and ensure final minimal schema.
-// Use this first.
+// Hard migrate legacy columns (kept from previous step)
 app.post('/admin/migrate-hard', async (req, res) => {
   try {
     const token = req.headers['x-internal-token'];
     if (token !== INTERNAL_API_TOKEN) return res.status(401).json({ error: 'unauthorized' });
 
     await pool.query(`
-      -- Make sure table exists
       CREATE TABLE IF NOT EXISTS oauth_sessions (
         sub          text,
         session_json jsonb,
@@ -316,12 +328,10 @@ app.post('/admin/migrate-hard', async (req, res) => {
         updated_at   timestamptz DEFAULT now()
       );
 
-      -- Backfill sub
       UPDATE oauth_sessions
          SET sub = COALESCE(sub, session_json->>'sub', session_json->>'did', sub)
        WHERE sub IS NULL;
 
-      -- Drop legacy columns that cause NOT NULL failures
       ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS issuer;
       ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS did;
       ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS access_jwt;
@@ -332,10 +342,8 @@ app.post('/admin/migrate-hard', async (req, res) => {
       ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS expires_at;
       ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS pds_url;
 
-      -- Recreate constraints/indexes
       DELETE FROM oauth_sessions WHERE sub IS NULL;
 
-      -- Build new table if needed and copy into it to enforce NOT NULL on session_json
       CREATE TABLE IF NOT EXISTS oauth_sessions__clean (
         sub          text PRIMARY KEY,
         session_json jsonb NOT NULL,
@@ -355,7 +363,6 @@ app.post('/admin/migrate-hard', async (req, res) => {
 
       CREATE UNIQUE INDEX IF NOT EXISTS oauth_sessions_sub_unique ON oauth_sessions(sub);
 
-      -- State table (used by OAuth flow)
       CREATE TABLE IF NOT EXISTS oauth_state (
         k text PRIMARY KEY,
         v jsonb NOT NULL,
@@ -370,7 +377,22 @@ app.post('/admin/migrate-hard', async (req, res) => {
   }
 });
 
-// Last resort: drop & recreate (old data renamed, not deleted).
+// Clear session & state (quick fix for token refresh conflicts)
+app.post('/admin/clear-session', async (req, res) => {
+  try {
+    const token = req.headers['x-internal-token'];
+    if (token !== INTERNAL_API_TOKEN) return res.status(401).json({ error: 'unauthorized' });
+
+    await pool.query('DELETE FROM oauth_sessions;');
+    await pool.query('DELETE FROM oauth_state;');
+    res.json({ ok: true, message: 'cleared oauth_sessions & oauth_state; run /auth/start again' });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// Last resort: drop & recreate
 app.post('/admin/reset-oauth-sessions', async (req, res) => {
   try {
     const token = req.headers['x-internal-token'];
@@ -410,3 +432,4 @@ app.post('/admin/reset-oauth-sessions', async (req, res) => {
 
 // Start server
 app.listen(PORT, () => console.log(`web listening on :${PORT}`));
+
