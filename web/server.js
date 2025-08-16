@@ -4,7 +4,6 @@ import cors from 'cors';
 import { Pool } from 'pg';
 import { NodeOAuthClient } from '@atproto/oauth-client-node';
 import { JoseKey } from '@atproto/jwk-jose';
-// We’ll wire post-testing later; keep Agent import for future use if needed
 import { Agent } from '@atproto/api';
 
 const {
@@ -28,8 +27,7 @@ if (!DATABASE_URL || !CLIENT_METADATA_URL || !INTERNAL_API_TOKEN) {
 const pool = new Pool({ connectionString: DATABASE_URL, max: 5 });
 
 async function ensureSchema() {
-  // NOTE: V2 table stores session ONLY by "sub" (OAuth subject).
-  // We do NOT require did/handle/issuer/pds_url because the library may not provide them.
+  // Store session only by OAuth subject (sub)
   const sql = `
   create table if not exists oauth_sessions_v2 (
     sub text primary key,
@@ -177,7 +175,6 @@ app.get('/auth/start', async (req, res) => {
 app.get('/oauth/callback', async (req, res) => {
   try {
     const result = await oauth.callback(new URLSearchParams(req.url.split('?')[1] ?? ''));
-    // Optional handle check if you set BSKY_EXPECTED_HANDLE
     if (BSKY_EXPECTED_HANDLE && result.session?.handle && result.session.handle !== BSKY_EXPECTED_HANDLE) {
       return res.status(400).send('Unexpected handle');
     }
@@ -188,18 +185,52 @@ app.get('/oauth/callback', async (req, res) => {
   }
 });
 
-// Placeholder agent fetch (we’ll wire posting after OAuth works)
+// --- NEW: Use the stored OAuth session to build an Agent and post ---
 async function getAgent() {
-  throw new Error('Posting from OAuth session will be wired up after OAuth is verified.');
+  const { rows } = await pool.query('select session_json from oauth_sessions_v2 limit 1');
+  if (!rows[0]) throw new Error('No OAuth session found. Visit /auth/start first.');
+  const oauthSession = rows[0].session_json;
+
+  // Per Bluesky docs, you can construct an Agent directly from an OAuth session.
+  // Source: npm docs indicate Agent can be constructed with the OAuth session object.
+  const agent = new Agent(oauthSession);
+  return agent;
 }
 
-// Simple posting endpoint (kept for later smoke test)
+const linkFacets = (text) => {
+  const spans = [];
+  const re = /https?:\/\/\S+/g;
+  let m;
+  while ((m = re.exec(text))) spans.push({ start: m.index, end: m.index + m[0].length, url: m[0] });
+  return spans.map((s) => ({
+    index: {
+      byteStart: Buffer.byteLength(text.slice(0, s.start), 'utf8'),
+      byteEnd: Buffer.byteLength(text.slice(0, s.end), 'utf8'),
+    },
+    features: [{ $type: 'app.bsky.richtext.facet#link', uri: s.url }],
+  }));
+};
+
 app.post('/post-thread', async (req, res) => {
   try {
     if (req.headers['x-internal-token'] !== INTERNAL_API_TOKEN) {
       return res.status(401).json({ error: 'unauthorized' });
     }
-    return res.status(501).json({ error: 'posting not wired yet for OAuth flow in this step' });
+    const { firstText, secondText } = req.body;
+    if (!firstText || !secondText) return res.status(400).json({ error: 'firstText and secondText required' });
+
+    const agent = await getAgent();
+    const createdAt = new Date().toISOString();
+
+    const first = await agent.post({ text: firstText, facets: linkFacets(firstText), createdAt });
+    const reply = await agent.post({
+      text: secondText,
+      facets: linkFacets(secondText),
+      createdAt: new Date().toISOString(),
+      reply: { root: { uri: first.uri, cid: first.cid }, parent: { uri: first.uri, cid: first.cid } },
+    });
+
+    res.json({ ok: true, first, reply });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'post failed' });
