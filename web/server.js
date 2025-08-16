@@ -10,7 +10,6 @@ import { Agent } from '@atproto/api';
 // ------------------------------
 // Env Variables
 // ------------------------------
-// FIX: Reverted to use BSKY_OAUTH_PRIVATE_KEY_JWK to match the working example.
 const {
   PORT = 8080,
   DATABASE_URL,
@@ -26,7 +25,6 @@ if (!DATABASE_URL) throw new Error('Missing DATABASE_URL');
 if (!CLIENT_METADATA_URL) throw new Error('Missing CLIENT_METADATA_URL');
 if (!WEB_BASE_URL) throw new Error('Missing WEB_BASE_URL');
 if (!BSKY_OAUTH_PRIVATE_KEY_JWK) throw new Error('Missing BSKY_OAUTH_PRIVATE_KEY_JWK');
-if (!BSKY_OAUTH_KID) throw new Error('Missing BSKY_OAUTH_KID');
 if (!INTERNAL_API_TOKEN) throw new Error('Missing INTERNAL_API_TOKEN');
 
 // ------------------------------
@@ -84,23 +82,24 @@ const sessionStore = {
 // ------------------------------
 // OAuth Client Setup
 // ------------------------------
-// FIX: Reverting to the exact initialization logic from your working example.
 const keyJwk = JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK);
 const signingKey = await JoseKey.fromImportable(keyJwk, BSKY_OAUTH_KID);
 
-// Fetch the public metadata from the URL
 const clientMetadataResponse = await fetch(CLIENT_METADATA_URL);
+if (!clientMetadataResponse.ok) {
+  throw new Error(`Failed to fetch client metadata: ${clientMetadataResponse.statusText}`)
+}
 const clientMetadata = await clientMetadataResponse.json();
 
 const client = new NodeOAuthClient({
   clientMetadata,
-  // keyset: [signingKey], // Do not pass the private key to the constructor
+  keyset: [signingKey],
   stateStore,
   sessionStore,
-})
+});
 
 const app = express();
-app.use(express.json()); // Middleware to parse JSON bodies
+app.use(express.json());
 
 // ------------------------------
 // Routes
