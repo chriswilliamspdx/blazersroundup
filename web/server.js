@@ -14,7 +14,7 @@ const {
   // Prefer private JWK; fall back to PEM
   BSKY_OAUTH_PRIVATE_KEY_JWK,
   BSKY_OAUTH_PRIVATE_KEY_PEM,
-  BSKY_OAUTH_KID,
+  BSKY_OAUTH_KID, // still used for validation/logging, but we won't pass it to JoseKey now
   INTERNAL_API_TOKEN,
   BSKY_EXPECTED_HANDLE,
   PORT = 8080,
@@ -22,8 +22,8 @@ const {
 
 function die(msg) { console.error(msg); process.exit(1); }
 
-if (!DATABASE_URL || !CLIENT_METADATA_URL || !BSKY_OAUTH_KID || !INTERNAL_API_TOKEN) {
-  die('Missing required env vars.');
+if (!DATABASE_URL || !CLIENT_METADATA_URL || !INTERNAL_API_TOKEN) {
+  die('Missing required env vars (need DATABASE_URL, CLIENT_METADATA_URL, INTERNAL_API_TOKEN).');
 }
 
 const pool = new Pool({ connectionString: DATABASE_URL, max: 5 });
@@ -50,6 +50,7 @@ await ensureSchema();
 // ---- Load private key (JWK preferred), with clear diagnostics ----
 let keyImportable = null;
 let keySource = 'none';
+let jwkKid = null;
 
 if (BSKY_OAUTH_PRIVATE_KEY_JWK && BSKY_OAUTH_PRIVATE_KEY_JWK.trim()) {
   keySource = 'JWK';
@@ -79,15 +80,17 @@ if (BSKY_OAUTH_PRIVATE_KEY_JWK && BSKY_OAUTH_PRIVATE_KEY_JWK.trim()) {
     die(`Private JWK must be OKP/Ed25519. Got kty=${jwk.kty}, crv=${jwk.crv}. Did you paste the public JWKS or an EC key by mistake?`);
   }
   if (!jwk.d) die('Private JWK is missing "d" (that means you pasted a **public** key; paste the PRIVATE JWK).');
-  if (typeof jwk.kid !== 'string') {
-    console.warn('Private JWK "kid" is not a string; setting it from BSKY_OAUTH_KID.');
+
+  // Record kid (if present) for logging; not strictly required
+  if (typeof jwk.kid === 'string') {
+    jwkKid = jwk.kid;
+  } else if (BSKY_OAUTH_KID) {
+    // if env kid provided but jwk lacks kid, set it (harmless)
     jwk.kid = BSKY_OAUTH_KID;
+    jwkKid = BSKY_OAUTH_KID;
   }
-  if (jwk.kid !== BSKY_OAUTH_KID) {
-    console.warn(`Private JWK kid (${jwk.kid}) != env BSKY_OAUTH_KID (${BSKY_OAUTH_KID}); using env kid.`);
-    jwk.kid = BSKY_OAUTH_KID;
-  }
-  keyImportable = jwk;
+
+  keyImportable = jwk; // <- pass the JWK itself; do NOT pass kid/options arg
 } else if (BSKY_OAUTH_PRIVATE_KEY_PEM && BSKY_OAUTH_PRIVATE_KEY_PEM.trim()) {
   keySource = 'PEM';
   const pem = BSKY_OAUTH_PRIVATE_KEY_PEM.replace(/\r\n/g, '\n').replace(/\\n/g, '\n').trim();
@@ -95,15 +98,16 @@ if (BSKY_OAUTH_PRIVATE_KEY_JWK && BSKY_OAUTH_PRIVATE_KEY_JWK.trim()) {
     die('BSKY_OAUTH_PRIVATE_KEY_PEM does not look like a PKCS8 PEM (must include BEGIN/END PRIVATE KEY).');
   }
   console.log('Loaded PEM (PKCS8).');
-  keyImportable = pem;
+  keyImportable = pem; // <- pass PEM by itself; no second arg
 } else {
   die('Provide either BSKY_OAUTH_PRIVATE_KEY_JWK (recommended) or BSKY_OAUTH_PRIVATE_KEY_PEM.');
 }
 
-const keyset = [ await JoseKey.fromImportable(keyImportable, { kid: BSKY_OAUTH_KID }) ];
-console.log(`Private key imported from ${keySource}. kid=${BSKY_OAUTH_KID}`);
+// IMPORTANT CHANGE: do NOT pass a second argument (kid/options) — causes the type error
+const keyset = [ await JoseKey.fromImportable(keyImportable) ];
+console.log(`Private key imported from ${keySource}. kid=${jwkKid ?? BSKY_OAUTH_KID ?? '(none)'}`);
 
-// Use full client metadata from URL
+// Use full client metadata from URL (it includes private_key_jwt + EdDSA)
 const oauth = new OAuthClient({
   responseMode: 'query',
   clientMetadataUrl: CLIENT_METADATA_URL,
@@ -115,8 +119,8 @@ const oauth = new OAuthClient({
   },
   sessionStore: {
     async set(sub, session){ const {did,handle,issuer,pdsUrl}=session; await pool.query(
-      `insert into oauth_sessions(did,handle,issuer,pds_url,session_json,updated_at)
-       values($1,$2,$3,$4,$5,now())
+      `insert into oauth_sessions(did, handle, issuer, pds_url, session_json, updated_at)
+       values($1,$2,$3,$4,$5, now())
        on conflict (did) do update set handle=excluded.handle, issuer=excluded.issuer, pds_url=excluded.pds_url, session_json=excluded.session_json, updated_at=now()`,
       [did,handle,issuer,pdsUrl,session]); },
     async get(sub){ const {rows}=await pool.query('select session_json from oauth_sessions where did=$1',[sub]); return rows[0]?.session_json; },
@@ -194,4 +198,3 @@ app.post('/post-thread', async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`web listening on :${PORT}`));
-
