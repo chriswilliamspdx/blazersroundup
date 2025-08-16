@@ -185,15 +185,42 @@ app.get('/oauth/callback', async (req, res) => {
   }
 });
 
-// --- NEW: Use the stored OAuth session to build an Agent and post ---
+// --- Build a logged-in Agent from stored OAuth session ---
 async function getAgent() {
   const { rows } = await pool.query('select session_json from oauth_sessions_v2 limit 1');
   if (!rows[0]) throw new Error('No OAuth session found. Visit /auth/start first.');
-  const oauthSession = rows[0].session_json;
+  const s = rows[0].session_json || {};
 
-  // Per Bluesky docs, you can construct an Agent directly from an OAuth session.
-  // Source: npm docs indicate Agent can be constructed with the OAuth session object.
-  const agent = new Agent(oauthSession);
+  // Determine service origin (PDS) from session, fallback to bsky.social
+  let service = 'https://bsky.social';
+  if (s.pdsUrl) {
+    try { service = new URL(s.pdsUrl).origin; } catch {}
+  }
+
+  if (!s.accessJwt || !s.refreshJwt || !s.did) {
+    throw new Error('OAuth session missing accessJwt/refreshJwt/did');
+  }
+
+  const agent = new Agent({ service });
+
+  // Prefer resumeSession if present; otherwise setSession; final fallback sets property.
+  const atpSession = {
+    accessJwt: s.accessJwt,
+    refreshJwt: s.refreshJwt,
+    did: s.did,
+    handle: s.handle ?? undefined,
+  };
+
+  if (typeof agent.resumeSession === 'function') {
+    const ok = await agent.resumeSession(atpSession);
+    if (!ok) throw new Error('resumeSession returned false');
+  } else if (typeof agent.setSession === 'function') {
+    agent.setSession(atpSession);
+  } else {
+    // very old versions fallback (should not be needed)
+    agent.session = atpSession;
+  }
+
   return agent;
 }
 
@@ -213,7 +240,9 @@ const linkFacets = (text) => {
 
 app.post('/post-thread', async (req, res) => {
   try {
-    if (req.headers['x-internal-token'] !== INTERNAL_API_TOKEN) {
+    // Auth header must match our internal token
+    const token = req.headers['x-internal-token'];
+    if (token !== INTERNAL_API_TOKEN) {
       return res.status(401).json({ error: 'unauthorized' });
     }
     const { firstText, secondText } = req.body;
@@ -238,3 +267,4 @@ app.post('/post-thread', async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`web listening on :${PORT}`));
+
