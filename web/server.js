@@ -95,7 +95,9 @@ const clientMetadata = {
   redirect_uris: [redirectUri],
   token_endpoint_auth_method: 'private_key_jwt',
   token_endpoint_auth_signing_alg: 'ES256',
-  scope: 'atproto', // FIX: Add the required 'atproto' scope back in
+  scope: 'atproto',
+  // FIX: Add the jwks_uri so the client can find the public key
+  jwks_uri: new URL('jwks.json', CLIENT_METADATA_URL).toString(),
 }
 
 const client = new NodeOAuthClient({
