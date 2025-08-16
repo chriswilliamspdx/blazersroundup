@@ -97,7 +97,7 @@ const clientMetadata = {
 
 const client = new NodeOAuthClient({
   clientMetadata,
-  keyset: [signingKey],
+  // keyset: [signingKey], // Do not pass the private key to the constructor
   stateStore,
   sessionStore,
 })
