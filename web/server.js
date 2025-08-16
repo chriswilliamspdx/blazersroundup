@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { NodeOAuthClient } from '@atproto/oauth-client-node'
 import { JoseKey } from '@atproto/jwk-jose'
 import { Agent } from '@atproto/api'
+import { MemoryLock } from '@atproto/oauth-client-node' // FIX: Import MemoryLock to fix the warning
 
 // ------------------------------
 // Env Variables
@@ -88,26 +89,24 @@ const signingKey = await JoseKey.fromImportable(BSKY_OAUTH_PRIVATE_KEY, BSKY_OAU
 
 const redirectUri = new URL('/oauth/callback', WEB_BASE_URL).toString()
 
-// This metadata object is passed to the client.
-// Crucially, it does NOT contain the private key.
 const clientMetadata = {
   client_id: CLIENT_METADATA_URL,
   redirect_uris: [redirectUri],
   token_endpoint_auth_method: 'private_key_jwt',
   token_endpoint_auth_signing_alg: 'ES256',
+  scope: 'atproto', // FIX: Add the required 'atproto' scope back in
 }
 
 const client = new NodeOAuthClient({
   clientMetadata,
   stateStore,
   sessionStore,
-  // NOTE: We are NOT providing the 'keyset' here to avoid the validation error.
-  // The library will use the signingKey we provide later.
+  lock: new MemoryLock('oauth'), // FIX: Add a lock to resolve the warning
 })
 
 const app = express()
 
-// ... (keep health check, debug, and other routes the same)
+// ... (the rest of the file remains the same)
 app.get('/', (_req, res) => res.type('text/plain').send('ok'))
 app.get('/session/debug', async (_req, res) => {
   const row = await pg.query(`SELECT sub, value, updated_at FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`)
@@ -123,7 +122,6 @@ app.get('/auth/start', async (req, res, next) => {
     const ac = new AbortController()
     req.on('close', () => ac.abort())
     
-    // We pass the signing key here, when it's actually needed
     const url = await client.authorize(handle, { state, signal: ac.signal, signingKey })
     return res.redirect(url)
   } catch (err) {
@@ -134,7 +132,6 @@ app.get('/auth/start', async (req, res, next) => {
 app.get('/oauth/callback', async (req, res, next) => {
   try {
     const params = new URLSearchParams(req.url.split('?')[1] || '')
-    // We pass the signing key here, when it's actually needed
     const { session } = await client.callback(params, { signingKey })
 
     const agent = new Agent(session)
@@ -150,12 +147,12 @@ app.get('/oauth/callback', async (req, res, next) => {
   }
 })
 
-// ... (the rest of the file remains the same)
 app.post('/post-thread', express.json(), async (req, res, next) => {
   try {
     const token = req.get('X-Internal-Token') || ''
     if (token !== INTERNAL_API_TOKEN) {
-return res.status(403).json({ error: 'forbidden' })    }
+      return res.status(403).json({ error: 'forbidden' })
+    }
     
     const { firstText, secondText } = req.body
     if (!firstText || !secondText) {
