@@ -3,13 +3,15 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "main": "../server.js",
+  "main": "server.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "start": "node ../server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "@atproto/api": "^0.16.0",
-    "@atproto/oauth-client": "^0.5.2",
     "@atproto/oauth-client-node": "^0.3.4",
     "express": "^4.19.2",
     "pg": "^8.11.5"
