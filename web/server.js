@@ -95,7 +95,7 @@ const clientMetadata = {
   scope: 'atproto',
 }
 
-const client = new NodeOAuthClient({
+const client = new NodeOAuth-Client({
   clientMetadata,
   // keyset: [signingKey], // Do not pass the private key to the constructor
   stateStore,
