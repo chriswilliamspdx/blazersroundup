@@ -2,19 +2,16 @@ import express from 'express';
 import bodyParser from 'body-parser';
 import cors from 'cors';
 import { Pool } from 'pg';
-import oauthPkg from '@atproto/oauth-client';
-const { OAuthClient } = oauthPkg;
-
+import { NodeOAuthClient } from '@atproto/oauth-client-node';
 import { JoseKey } from '@atproto/jwk-jose';
 import { Agent } from '@atproto/api';
 
 const {
   DATABASE_URL,
   CLIENT_METADATA_URL,
-  // Prefer private JWK; fall back to PEM
-  BSKY_OAUTH_PRIVATE_KEY_JWK,
-  BSKY_OAUTH_PRIVATE_KEY_PEM,
-  BSKY_OAUTH_KID, // optional (for logging)
+  BSKY_OAUTH_PRIVATE_KEY_JWK, // preferred
+  BSKY_OAUTH_PRIVATE_KEY_PEM, // optional fallback
+  BSKY_OAUTH_KID,             // optional (we’ll keep in JWK if set)
   INTERNAL_API_TOKEN,
   BSKY_EXPECTED_HANDLE,
   PORT = 8080,
@@ -47,80 +44,60 @@ async function ensureSchema() {
 }
 await ensureSchema();
 
-// ---- Load private key (JWK preferred), with clear diagnostics ----
+// ---- Load private key (require EC/P-256 for ES256) ----
 let keyImportable = null;
-let keySource = 'none';
 let jwkKid = null;
 
 if (BSKY_OAUTH_PRIVATE_KEY_JWK && BSKY_OAUTH_PRIVATE_KEY_JWK.trim()) {
-  keySource = 'JWK';
   let jwk;
   try {
     jwk = JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK);
   } catch {
-    die('BSKY_OAUTH_PRIVATE_KEY_JWK is not valid JSON. Paste the **PRIVATE JWK (JSON)** printed by the generator (not the public JWKS).');
+    die('BSKY_OAUTH_PRIVATE_KEY_JWK is not valid JSON. Paste the PRIVATE JWK object (not the JWKS set).');
   }
-  // If someone pasted a JWKS, unwrap the first key
   if (jwk && typeof jwk === 'object' && Array.isArray(jwk.keys)) {
-    console.warn('BSKY_OAUTH_PRIVATE_KEY_JWK looks like a JWKS set; using keys[0].');
+    console.warn('BSKY_OAUTH_PRIVATE_KEY_JWK looks like a JWKS; using keys[0].');
     jwk = jwk.keys[0];
   }
-  const summary = {
-    type: typeof jwk,
-    kty: jwk?.kty,
-    crv: jwk?.crv,
-    has_d: !!jwk?.d,
-    kid_type: typeof jwk?.kid,
-  };
-  console.log('Loaded JWK summary:', summary);
-
+  console.log('Loaded JWK summary:', {
+    type: typeof jwk, kty: jwk?.kty, crv: jwk?.crv, has_d: !!jwk?.d, kid_type: typeof jwk?.kid
+  });
   if (!jwk || typeof jwk !== 'object') die('Private JWK must be a JSON object.');
-  // IMPORTANT: we require EC / P-256 (ES256) for private_key_jwt with this library
   if (jwk.kty !== 'EC' || jwk.crv !== 'P-256') {
     die(`Private JWK must be EC/P-256 (ES256). Got kty=${jwk.kty}, crv=${jwk.crv}.`);
   }
-  if (!jwk.d) die('Private JWK is missing "d" (that means you pasted a **public** key; paste the PRIVATE JWK with "d").');
-
+  if (!jwk.d) die('Private JWK is missing "d" (you pasted the public key; use the PRIVATE JWK).');
   if (typeof jwk.kid === 'string') jwkKid = jwk.kid;
   else if (BSKY_OAUTH_KID) { jwk.kid = BSKY_OAUTH_KID; jwkKid = BSKY_OAUTH_KID; }
-
-  keyImportable = jwk; // pass JWK directly; no options arg
+  keyImportable = jwk;
 } else if (BSKY_OAUTH_PRIVATE_KEY_PEM && BSKY_OAUTH_PRIVATE_KEY_PEM.trim()) {
-  keySource = 'PEM';
   const pem = BSKY_OAUTH_PRIVATE_KEY_PEM.replace(/\r\n/g, '\n').replace(/\\n/g, '\n').trim();
   if (!pem.includes('-----BEGIN PRIVATE KEY-----') || !pem.includes('-----END PRIVATE KEY-----')) {
-    die('BSKY_OAUTH_PRIVATE_KEY_PEM does not look like a PKCS8 PEM (must include BEGIN/END PRIVATE KEY).');
+    die('BSKY_OAUTH_PRIVATE_KEY_PEM must be a PKCS8 private key (BEGIN/END PRIVATE KEY).');
   }
   console.log('Loaded PEM (PKCS8).');
-  keyImportable = pem; // pass PEM directly
+  keyImportable = pem;
 } else {
-  die('Provide either BSKY_OAUTH_PRIVATE_KEY_JWK (recommended) or BSKY_OAUTH_PRIVATE_KEY_PEM.');
+  die('Provide BSKY_OAUTH_PRIVATE_KEY_JWK (recommended) or BSKY_OAUTH_PRIVATE_KEY_PEM.');
 }
 
-// IMPORTANT: do NOT pass a second argument (kid/options) — some versions error out
 const keyset = [ await JoseKey.fromImportable(keyImportable) ];
-console.log(`Private key imported from ${keySource}. kid=${jwkKid ?? BSKY_OAUTH_KID ?? '(none)'}`);
+console.log(`Private key imported. kid=${jwkKid ?? BSKY_OAUTH_KID ?? '(none)'}`);
 
-// ---- Fetch client metadata JSON ourselves and pass as object ----
+// ---- Fetch client metadata JSON and pass as object ----
 let clientMetadata;
 try {
   const resp = await fetch(CLIENT_METADATA_URL, { redirect: 'follow' });
-  if (!resp.ok) {
-    die(`Failed to fetch CLIENT_METADATA_URL (${resp.status} ${resp.statusText})`);
-  }
+  if (!resp.ok) die(`Failed to fetch CLIENT_METADATA_URL (${resp.status} ${resp.statusText})`);
   clientMetadata = await resp.json();
 } catch (e) {
-  console.error(e);
-  die('Could not load CLIENT_METADATA_URL JSON.');
+  console.error(e); die('Could not load CLIENT_METADATA_URL JSON.');
 }
 
-// Minimal sanity checks
+// Sanity checks (must be https redirect on non-localhost)
 if (!clientMetadata || typeof clientMetadata !== 'object') die('client metadata JSON is not an object.');
 if (!clientMetadata.client_id) die('client metadata missing client_id.');
 if (!clientMetadata.jwks && !clientMetadata.jwks_uri) die('client metadata must include jwks or jwks_uri.');
-if (!Array.isArray(clientMetadata.redirect_uris)) {
-  console.warn('client metadata has no redirect_uris array yet — we can still start the server, but OAuth will require it to be set correctly.');
-}
 console.log('Loaded client metadata summary:', {
   has_jwks: !!clientMetadata.jwks,
   has_jwks_uri: !!clientMetadata.jwks_uri,
@@ -128,13 +105,14 @@ console.log('Loaded client metadata summary:', {
   signing_alg: clientMetadata.token_endpoint_auth_signing_alg,
 });
 
-// Construct OAuth client with the loaded metadata
-const oauth = new OAuthClient({
+// ---- Construct the Node OAuth client (no custom runtime needed) ----
+const oauth = new NodeOAuthClient({
   responseMode: 'query',
   clientMetadata,
   keyset,
   stateStore: {
-    async set(k, v){ await pool.query('insert into oauth_state(k,v) values($1,$2) on conflict (k) do update set v=excluded.v, created_at=now()', [k,v]); },
+    async set(k, v){ await pool.query(
+      'insert into oauth_state(k,v) values($1,$2) on conflict (k) do update set v=excluded.v, created_at=now()', [k,v]); },
     async get(k){ const {rows}=await pool.query('select v from oauth_state where k=$1',[k]); return rows[0]?.v; },
     async del(k){ await pool.query('delete from oauth_state where k=$1',[k]); },
   },
@@ -147,6 +125,7 @@ const oauth = new OAuthClient({
     async get(sub){ const {rows}=await pool.query('select session_json from oauth_sessions where did=$1',[sub]); return rows[0]?.session_json; },
     async del(sub){ await pool.query('delete from oauth_sessions where did=$1',[sub]); },
   },
+  // requestLock is optional when you’re running a single instance
 });
 
 const app = express();
