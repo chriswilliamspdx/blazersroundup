@@ -15,7 +15,7 @@ const {
   DATABASE_URL,
   CLIENT_METADATA_URL,
   WEB_BASE_URL,
-  BSKY_OAUTH_PRIVATE_KEY_JWK, // Using the specific _JWK variable from your working code
+  BSKY_OAUTH_PRIVATE_KEY_JWK,
   BSKY_OAUTH_KID,
   BSKY_EXPECTED_HANDLE,
   INTERNAL_API_TOKEN,
@@ -123,12 +123,16 @@ app.get('/auth/start', async (req, res, next) => {
   }
 });
 
+// FIX: Replaced `client.callback` with the correct `client.validateCallback` method.
 app.get('/oauth/callback', async (req, res, next) => {
   try {
-    const params = new URLSearchParams(req.url.split('?')[1] || '');
-    const { session } = await client.callback(params);
+    const callbackUrl = new URL(req.url, WEB_BASE_URL).toString();
+    const session = await client.validateCallback(callbackUrl, { signingKey });
 
-    const agent = new Agent({ service: 'https://bsky.social', ...session });
+    // After successful validation, we must save the session.
+    await sessionStore.set(session.did, session);
+
+    const agent = new Agent({ service: 'https://bsky.social', session });
     const profile = await agent.getProfile({ actor: session.did }).catch(() => null);
     
     res.type('text/plain').send(
@@ -140,6 +144,7 @@ app.get('/oauth/callback', async (req, res, next) => {
     return next(err);
   }
 });
+
 
 app.post('/post-thread', async (req, res, next) => {
   try {
