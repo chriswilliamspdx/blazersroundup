@@ -133,11 +133,11 @@ app.get('/auth/start', async (req, res, next) => {
 
 app.get('/oauth/callback', async (req, res, next) => {
   try {
-    const params = new URLSearchParams(req.url.split('?')[1] || '')
-    const { session } = await client.callback(params)
+    const callbackUrl = new URL(req.url, WEB_BASE_URL)
+    const session = await client.validateCallback(callbackUrl, { signingKey })
 
-    const agent = new Agent(session)
-    const profile = await agent.getProfile({ actor: agent.did }).catch(() => null)
+    const agent = new Agent({ service: 'https://bsky.social', session })
+    const profile = await agent.getProfile({ actor: session.did }).catch(() => null)
     
     res.type('text/plain').send(
       `✅ SUCCESS! OAuth complete for DID: ${session.did}\n` +
