@@ -2,10 +2,10 @@
   "keys": [
     {
       "crv": "Ed25519",
-      "x": "0zAkwkywIvAk-qAiUM4tBZpCEA8BxQ-dnpeQIPOPaLY",
+      "x": "J3CtBgHb0r_Tsud-PSdpQBN2fN6Ne8pFs2AdEm7ApKo",
       "kty": "OKP",
       "use": "sig",
-      "kid": "9890794a-0074-4c35-9b2a-2cdd9fce6496"
+      "kid": "c279cdd2-4156-4d3d-a90e-94add8b4f0b6"
     }
   ]
 }
