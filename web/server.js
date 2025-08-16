@@ -14,7 +14,7 @@ const {
   // Prefer private JWK; fall back to PEM
   BSKY_OAUTH_PRIVATE_KEY_JWK,
   BSKY_OAUTH_PRIVATE_KEY_PEM,
-  BSKY_OAUTH_KID, // still used for validation/logging, but we won't pass it to JoseKey now
+  BSKY_OAUTH_KID, // optional (for logging)
   INTERNAL_API_TOKEN,
   BSKY_EXPECTED_HANDLE,
   PORT = 8080,
@@ -60,12 +60,10 @@ if (BSKY_OAUTH_PRIVATE_KEY_JWK && BSKY_OAUTH_PRIVATE_KEY_JWK.trim()) {
   } catch {
     die('BSKY_OAUTH_PRIVATE_KEY_JWK is not valid JSON. Paste the **PRIVATE JWK (JSON)** printed by the generator (not the public JWKS).');
   }
-  // If someone pasted a JWKS, unwrap the first key
   if (jwk && typeof jwk === 'object' && Array.isArray(jwk.keys)) {
     console.warn('BSKY_OAUTH_PRIVATE_KEY_JWK looks like a JWKS set; using keys[0].');
     jwk = jwk.keys[0];
   }
-  // Show a safe summary of what we received
   const summary = {
     type: typeof jwk,
     kty: jwk?.kty,
@@ -81,16 +79,10 @@ if (BSKY_OAUTH_PRIVATE_KEY_JWK && BSKY_OAUTH_PRIVATE_KEY_JWK.trim()) {
   }
   if (!jwk.d) die('Private JWK is missing "d" (that means you pasted a **public** key; paste the PRIVATE JWK).');
 
-  // Record kid (if present) for logging; not strictly required
-  if (typeof jwk.kid === 'string') {
-    jwkKid = jwk.kid;
-  } else if (BSKY_OAUTH_KID) {
-    // if env kid provided but jwk lacks kid, set it (harmless)
-    jwk.kid = BSKY_OAUTH_KID;
-    jwkKid = BSKY_OAUTH_KID;
-  }
+  if (typeof jwk.kid === 'string') jwkKid = jwk.kid;
+  else if (BSKY_OAUTH_KID) { jwk.kid = BSKY_OAUTH_KID; jwkKid = BSKY_OAUTH_KID; }
 
-  keyImportable = jwk; // <- pass the JWK itself; do NOT pass kid/options arg
+  keyImportable = jwk; // pass JWK directly; no options arg
 } else if (BSKY_OAUTH_PRIVATE_KEY_PEM && BSKY_OAUTH_PRIVATE_KEY_PEM.trim()) {
   keySource = 'PEM';
   const pem = BSKY_OAUTH_PRIVATE_KEY_PEM.replace(/\r\n/g, '\n').replace(/\\n/g, '\n').trim();
@@ -98,19 +90,45 @@ if (BSKY_OAUTH_PRIVATE_KEY_JWK && BSKY_OAUTH_PRIVATE_KEY_JWK.trim()) {
     die('BSKY_OAUTH_PRIVATE_KEY_PEM does not look like a PKCS8 PEM (must include BEGIN/END PRIVATE KEY).');
   }
   console.log('Loaded PEM (PKCS8).');
-  keyImportable = pem; // <- pass PEM by itself; no second arg
+  keyImportable = pem; // pass PEM directly
 } else {
   die('Provide either BSKY_OAUTH_PRIVATE_KEY_JWK (recommended) or BSKY_OAUTH_PRIVATE_KEY_PEM.');
 }
 
-// IMPORTANT CHANGE: do NOT pass a second argument (kid/options) — causes the type error
 const keyset = [ await JoseKey.fromImportable(keyImportable) ];
 console.log(`Private key imported from ${keySource}. kid=${jwkKid ?? BSKY_OAUTH_KID ?? '(none)'}`);
 
-// Use full client metadata from URL (it includes private_key_jwt + EdDSA)
+// ---- Fetch client metadata JSON ourselves and pass as object ----
+let clientMetadata;
+try {
+  const resp = await fetch(CLIENT_METADATA_URL, { redirect: 'follow' });
+  if (!resp.ok) {
+    die(`Failed to fetch CLIENT_METADATA_URL (${resp.status} ${resp.statusText})`);
+  }
+  clientMetadata = await resp.json();
+} catch (e) {
+  console.error(e);
+  die('Could not load CLIENT_METADATA_URL JSON.');
+}
+
+// Minimal sanity checks (to avoid the undefined error in oauth-client)
+if (!clientMetadata || typeof clientMetadata !== 'object') die('client metadata JSON is not an object.');
+if (!clientMetadata.client_id) die('client metadata missing client_id.');
+if (!clientMetadata.jwks && !clientMetadata.jwks_uri) die('client metadata must include jwks or jwks_uri.');
+if (!Array.isArray(clientMetadata.redirect_uris)) {
+  console.warn('client metadata has no redirect_uris array yet — we can still start the server, but OAuth will require it to be set correctly.');
+}
+console.log('Loaded client metadata summary:', {
+  has_jwks: !!clientMetadata.jwks,
+  has_jwks_uri: !!clientMetadata.jwks_uri,
+  token_auth_method: clientMetadata.token_endpoint_auth_method,
+  signing_alg: clientMetadata.token_endpoint_auth_signing_alg,
+});
+
+// Construct OAuth client with the loaded metadata
 const oauth = new OAuthClient({
   responseMode: 'query',
-  clientMetadataUrl: CLIENT_METADATA_URL,
+  clientMetadata,
   keyset,
   stateStore: {
     async set(k, v){ await pool.query('insert into oauth_state(k,v) values($1,$2) on conflict (k) do update set v=excluded.v, created_at=now()', [k,v]); },
