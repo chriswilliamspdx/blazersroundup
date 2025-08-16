@@ -91,6 +91,7 @@ const redirectUri = new URL('/oauth/callback', WEB_BASE_URL).toString()
 const clientMetadata = {
   client_id: CLIENT_METADATA_URL,
   redirect_uris: [redirectUri],
+  scope: 'atproto',
 }
 
 const client = new NodeOAuthClient({
