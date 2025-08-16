@@ -155,8 +155,7 @@ app.post('/post-thread', express.json(), async (req, res, next) => {
   try {
     const token = req.get('X-Internal-Token') || ''
     if (token !== INTERNAL_API_TOKEN) {
-      return res.status(4is a -3).json({ error: 'forbidden' })
-    }
+return res.status(403).json({ error: 'forbidden' })    }
     
     const { firstText, secondText } = req.body
     if (!firstText || !secondText) {
