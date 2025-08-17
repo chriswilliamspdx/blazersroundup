@@ -24,6 +24,8 @@ if (!DATABASE_URL || !CLIENT_METADATA_URL || !BSKY_OAUTH_PRIVATE_KEY_JWK || !INT
   throw new Error('Missing one or more required environment variables.');
 }
 
+const WEB_BASE_URL = new URL(CLIENT_METADATA_URL).origin;
+
 // ------------------------------
 // Postgres Setup
 // ------------------------------
@@ -51,17 +53,13 @@ const sessionStore = {
 const keyJwk = JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK);
 const signingKey = await JoseKey.fromImportable(keyJwk, BSKY_OAUTH_KID);
 const publicJwk = await signingKey.toPublicJwk();
-if (!publicJwk.kid) publicJwk.kid = signingKey.kid
-
-const webBaseUrl = new URL(CLIENT_METADATA_URL).origin;
-const redirectUri = new URL('/oauth/callback', webBaseUrl).toString();
-const jwksUri = new URL('/jwks.json', webBaseUrl).toString();
+if (!publicJwk.kid) publicJwk.kid = signingKey.kid;
 
 const clientMetadata = {
   client_id: CLIENT_METADATA_URL,
   client_name: 'Blazers Roundup Bot',
-  redirect_uris: [redirectUri],
-  jwks_uri: jwksUri,
+  redirect_uris: [new URL('/oauth/callback', WEB_BASE_URL).toString()],
+  jwks_uri: new URL('/jwks.json', WEB_BASE_URL).toString(),
   grant_types: ['authorization_code', 'refresh_token'],
   response_types: ['code'],
   scope: 'atproto',
@@ -80,7 +78,7 @@ const app = express();
 app.use(express.json());
 
 // ------------------------------
-// NEW: Serve Self-Hosted Metadata
+// Self-Hosted Metadata Endpoints
 // ------------------------------
 app.get('/bsky-client.json', (_req, res) => {
   res.json(clientMetadata);
@@ -95,17 +93,12 @@ app.get('/jwks.json', (_req, res) => {
 // ------------------------------
 app.get('/', (_req, res) => res.type('text/plain').send('ok'));
 
-app.get('/session/debug', async (_req, res) => {
-  const row = await pg.query(`SELECT sub, value, updated_at FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
-  res.json({ haveSession: row.rowCount > 0, session: row.rows[0] || null });
-});
-
 app.get('/auth/start', async (req, res, next) => {
   try {
     const handle = (req.query.handle || BSKY_EXPECTED_HANDLE)?.toString();
     if (!handle) return res.status(400).send('missing ?handle');
     
-    const url = await client.authorize(handle);
+    const url = await client.authorize(handle, { signingKey });
     return res.redirect(url);
   } catch (err) {
     return next(err);
@@ -114,10 +107,12 @@ app.get('/auth/start', async (req, res, next) => {
 
 app.get('/oauth/callback', async (req, res, next) => {
   try {
-    const params = new URLSearchParams(req.url.split('?')[1] || '');
-    const { session } = await client.callback(params);
+    const callbackUrl = new URL(req.url, WEB_BASE_URL).toString();
+    const { session } = await client.validateCallback(callbackUrl, { signingKey });
+
     await sessionStore.set(session.did, session);
-    const agent = new Agent({ service: 'https://bsky.social', ...session });
+
+    const agent = new Agent({ service: 'https://bsky.social', session });
     const profile = await agent.getProfile({ actor: session.did }).catch(() => null);
     
     res.type('text/plain').send(
@@ -130,31 +125,22 @@ app.get('/oauth/callback', async (req, res, next) => {
   }
 });
 
-app.post('/post-thread', async (req, res, next) => {
+app.post('/post-thread', express.json(), async (req, res, next) => {
   try {
     const token = req.get('X-Internal-Token') || '';
-    if (token !== INTERNAL_API_TOKEN) {
-      return res.status(403).json({ error: 'forbidden' });
-    }
+    if (token !== INTERNAL_API_TOKEN) return res.status(403).json({ error: 'forbidden' });
     
     const { firstText, secondText } = req.body;
-    if (!firstText || !secondText) {
-      return res.status(400).json({ error: 'missing firstText or secondText' });
-    }
+    if (!firstText || !secondText) return res.status(400).json({ error: 'missing firstText or secondText' });
     
     const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
-    if (!row.rowCount) {
-      return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
-    }
+    if (!row.rowCount) return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
     
-    const session = await client.restore(row.rows[0].sub);
-    const agent = new Agent({ service: 'https://bsky.social', ...session });
+    const session = await client.restore(row.rows[0].sub, { signingKey });
+    const agent = new Agent({ service: 'https://bsky.social', session });
     
     const firstPost = await agent.post({ text: firstText });
-    await agent.post({
-      text: secondText,
-      reply: { root: firstPost, parent: firstPost }
-    });
+    await agent.post({ text: secondText, reply: { root: firstPost, parent: firstPost }});
     
     return res.json({ ok: true });
   } catch(err) {
@@ -166,10 +152,6 @@ app.use((err, _req, res, _next) => {
   console.error('--- unhandled error ---');
   console.error(err);
   res.status(500).json({ error: err.name || 'ServerError', message: err.message });
-});
-
-app.listen(PORT, () => {
-  console.log(`web listening on :${PORT}`);
 });
 
 app.listen(PORT, () => {
