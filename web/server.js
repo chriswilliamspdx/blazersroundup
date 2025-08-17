@@ -82,7 +82,8 @@ app.get('/session/debug', async (_req, res) => {
 
 app.get('/auth/start', async (req, res, next) => {
   try {
-    const handle = (req.query.handle || BSKY_EXPECTED_HANDLE)?.toString();
+    // FIX: The handle must not have an "@" prefix for identity resolution.
+    const handle = (req.query.handle || BSKY_EXPECTED_HANDLE)?.toString().replace(/^@/, '');
     if (!handle) return res.status(400).send('missing ?handle');
     
     const url = await client.authorize(handle);
