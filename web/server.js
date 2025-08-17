@@ -121,21 +121,23 @@ app.get('/oauth/callback', async (req, res, next) => {
     const params = new URLSearchParams(req.url.split('?')[1] || '');
     console.log('OAUTH CALLBACK PARAMS:', params.toString());
 
-    // Per Bluesky docs, client.callback(params) returns the session directly
-    const session = await client.callback(params);
-    console.log('OAUTH CALLBACK RAW RESULT:', session);
+    const result = await client.callback(params);
+    console.log('OAUTH CALLBACK RAW RESULT:', result);
 
-    if (!session || typeof session !== 'object' || !session.access_token) {
+    // The actual session is in result.session
+    const session = result.session;
+
+    if (!session || typeof session !== 'object' || !session.sub) {
       throw new Error('OAuth callback did not return a valid session object.');
     }
 
-    await sessionStore.set(session.did, session);
+    await sessionStore.set(session.sub, session);
 
     const agent = new Agent({ service: 'https://bsky.social', ...session });
-    const profile = await agent.getProfile({ actor: session.did }).catch(() => null);
+    const profile = await agent.getProfile({ actor: session.sub }).catch(() => null);
 
     res.type('text/plain').send(
-      `✅ SUCCESS! OAuth complete for DID: ${session.did}\n` +
+      `✅ SUCCESS! OAuth complete for DID: ${session.sub}\n` +
       (profile ? `Logged in as: ${profile.data.handle}\n` : '') +
       `You can now close this window. The bot is authorized.`
     );
