@@ -82,8 +82,8 @@ const sessionStore = {
 // ------------------------------
 // OAuth Client Setup
 // ------------------------------
-// FIX: Instead of fetching metadata, we build it statically here.
-// This removes the network request as a point of failure.
+// This new strategy builds the metadata object directly in the code.
+// This removes any potential for errors from fetching external files.
 const keyJwk = JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK);
 const signingKey = await JoseKey.fromImportable(keyJwk, BSKY_OAUTH_KID);
 
