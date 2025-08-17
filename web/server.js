@@ -124,20 +124,36 @@ app.get('/oauth/callback', async (req, res, next) => {
     const result = await client.callback(params);
     console.log('OAUTH CALLBACK RAW RESULT:', result);
 
-    // The actual session is in result.session
     const session = result.session;
 
     if (!session || typeof session !== 'object' || !session.sub) {
       throw new Error('OAuth callback did not return a valid session object.');
     }
 
-    await sessionStore.set(session.sub, session);
+    // Safely save only the plain serializable fields
+    let serializable;
+    if (typeof session.toJSON === 'function') {
+      serializable = session.toJSON();
+    } else {
+      // fallback: pick common fields manually
+      serializable = {
+        access_token: session.access_token,
+        refresh_token: session.refresh_token,
+        expires_at: session.expires_at,
+        handle: session.handle,
+        sub: session.sub,
+        did: session.did,
+        scope: session.scope,
+        token_type: session.token_type,
+      };
+    }
+    await sessionStore.set(session.sub, serializable);
 
-    const agent = new Agent({ service: 'https://bsky.social', ...session });
-    const profile = await agent.getProfile({ actor: session.sub }).catch(() => null);
+    const agent = new Agent({ service: 'https://bsky.social', ...serializable });
+    const profile = await agent.getProfile({ actor: serializable.sub || serializable.did }).catch(() => null);
 
     res.type('text/plain').send(
-      `✅ SUCCESS! OAuth complete for DID: ${session.sub}\n` +
+      `✅ SUCCESS! OAuth complete for DID: ${serializable.sub || serializable.did}\n` +
       (profile ? `Logged in as: ${profile.data.handle}\n` : '') +
       `You can now close this window. The bot is authorized.`
     );
