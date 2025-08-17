@@ -11,9 +11,9 @@
     "start": "node server.js"
   },
   "dependencies": {
-  "@atproto/api": "0.12.2",
-  "@atproto/oauth-client-node": "0.2.0",
-  "express": "^4.19.2",
-  "pg": "^8.11.5"
-}
+    "@atproto/api": "^0.16.0",
+    "@atproto/oauth-client-node": "^0.3.4",
+    "express": "^4.19.2",
+    "pg": "^8.11.5"
+  }
 }
