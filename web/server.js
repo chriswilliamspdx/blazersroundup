@@ -1,4 +1,4 @@
-// web/server.js (ESM) - Bluesky OAuth + Posting API
+// web/server.js (ESM) - Self-Contained OAuth Server
 import express from 'express';
 import { Pool } from 'pg';
 import { randomUUID } from 'node:crypto';
@@ -13,19 +13,16 @@ import { Agent } from '@atproto/api';
 const {
   PORT = 8080,
   DATABASE_URL,
-  CLIENT_METADATA_URL, // This is the public ID of our application
-  WEB_BASE_URL,      // This is the URL of THIS server
+  CLIENT_METADATA_URL, // The public URL of THIS server's /bsky-client.json endpoint
   BSKY_OAUTH_PRIVATE_KEY_JWK,
   BSKY_OAUTH_KID,
   BSKY_EXPECTED_HANDLE,
   INTERNAL_API_TOKEN,
 } = process.env;
 
-if (!DATABASE_URL) throw new Error('Missing DATABASE_URL');
-if (!CLIENT_METADATA_URL) throw new Error('Missing CLIENT_METADATA_URL');
-if (!WEB_BASE_URL) throw new Error('Missing WEB_BASE_URL');
-if (!BSKY_OAUTH_PRIVATE_KEY_JWK) throw new Error('Missing BSKY_OAUTH_PRIVATE_KEY_JWK');
-if (!INTERNAL_API_TOKEN) throw new Error('Missing INTERNAL_API_TOKEN');
+if (!DATABASE_URL || !CLIENT_METADATA_URL || !BSKY_OAUTH_PRIVATE_KEY_JWK || !INTERNAL_API_TOKEN) {
+  throw new Error('Missing one or more required environment variables.');
+}
 
 // ------------------------------
 // Postgres Setup
@@ -33,50 +30,19 @@ if (!INTERNAL_API_TOKEN) throw new Error('Missing INTERNAL_API_TOKEN');
 const pg = new Pool({ connectionString: DATABASE_URL });
 
 await pg.query(`
-CREATE TABLE IF NOT EXISTS oauth_state (
-  key        TEXT PRIMARY KEY,
-  value      JSONB NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE TABLE IF NOT EXISTS oauth_sessions (
-  sub        TEXT PRIMARY KEY,
-  value      JSONB NOT NULL,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+CREATE TABLE IF NOT EXISTS oauth_state ( key TEXT PRIMARY KEY, value JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS oauth_sessions ( sub TEXT PRIMARY KEY, value JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 `);
 
 const stateStore = {
-  async set(key, internalState) {
-    await pg.query(
-      `INSERT INTO oauth_state(k, v) VALUES ($1, $2)
-       ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v`,
-      [key, internalState],
-    )
-  },
-  async get(key) {
-    const res = await pg.query(`SELECT v FROM oauth_state WHERE k = $1`, [key])
-    return res.rows[0]?.v
-  },
-  async del(key) {
-    await pg.query(`DELETE FROM oauth_state WHERE k = $1`, [key])
-  },
+  async set(key, internalState) { await pg.query(`INSERT INTO oauth_state(key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [key, internalState]); },
+  async get(key) { const res = await pg.query(`SELECT value FROM oauth_state WHERE key = $1`, [key]); return res.rows[0]?.value; },
+  async del(key) { await pg.query(`DELETE FROM oauth_state WHERE key = $1`, [key]); },
 };
 const sessionStore = {
-  async set(sub, sessionData) {
-    await pg.query(
-      `INSERT INTO oauth_sessions(sub, value, updated_at)
-       VALUES ($1, $2, now())
-       ON CONFLICT (sub) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-      [sub, sessionData],
-    );
-  },
-  async get(sub) {
-    const res = await pg.query(`SELECT value FROM oauth_sessions WHERE sub = $1`, [sub]);
-    return res.rows[0]?.value;
-  },
-  async del(sub) {
-    await pg.query(`DELETE FROM oauth_sessions WHERE sub = $1`, [sub]);
-  },
+  async set(sub, sessionData) { await pg.query(`INSERT INTO oauth_sessions(sub, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (sub) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, [sub, sessionData]); },
+  async get(sub) { const res = await pg.query(`SELECT value FROM oauth_sessions WHERE sub = $1`, [sub]); return res.rows[0]?.value; },
+  async del(sub) { await pg.query(`DELETE FROM oauth_sessions WHERE sub = $1`, [sub]); },
 };
 
 // ------------------------------
@@ -84,9 +50,12 @@ const sessionStore = {
 // ------------------------------
 const keyJwk = JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK);
 const signingKey = await JoseKey.fromImportable(keyJwk, BSKY_OAUTH_KID);
+const publicJwk = await signingKey.toPublicJwk();
+if (!publicJwk.kid) publicJwk.kid = signingKey.kid
 
-const redirectUri = new URL('/oauth/callback', WEB_BASE_URL).toString();
-const jwksUri = new URL('jwks.json', CLIENT_METADATA_URL).toString();
+const webBaseUrl = new URL(CLIENT_METADATA_URL).origin;
+const redirectUri = new URL('/oauth/callback', webBaseUrl).toString();
+const jwksUri = new URL('/jwks.json', webBaseUrl).toString();
 
 const clientMetadata = {
   client_id: CLIENT_METADATA_URL,
@@ -111,6 +80,17 @@ const app = express();
 app.use(express.json());
 
 // ------------------------------
+// NEW: Serve Self-Hosted Metadata
+// ------------------------------
+app.get('/bsky-client.json', (_req, res) => {
+  res.json(clientMetadata);
+});
+
+app.get('/jwks.json', (_req, res) => {
+  res.json({ keys: [publicJwk] });
+});
+
+// ------------------------------
 // Routes
 // ------------------------------
 app.get('/', (_req, res) => res.type('text/plain').send('ok'));
@@ -122,8 +102,7 @@ app.get('/session/debug', async (_req, res) => {
 
 app.get('/auth/start', async (req, res, next) => {
   try {
-    // FIX: Bypass handle resolution by using the DID directly.
-const handle = 'did:plc:pwh557k2hzyusynp6q4i5wdb';
+    const handle = (req.query.handle || BSKY_EXPECTED_HANDLE)?.toString();
     if (!handle) return res.status(400).send('missing ?handle');
     
     const url = await client.authorize(handle);
@@ -137,9 +116,7 @@ app.get('/oauth/callback', async (req, res, next) => {
   try {
     const params = new URLSearchParams(req.url.split('?')[1] || '');
     const { session } = await client.callback(params);
-
     await sessionStore.set(session.did, session);
-
     const agent = new Agent({ service: 'https://bsky.social', ...session });
     const profile = await agent.getProfile({ actor: session.did }).catch(() => null);
     
@@ -176,25 +153,23 @@ app.post('/post-thread', async (req, res, next) => {
     const firstPost = await agent.post({ text: firstText });
     await agent.post({
       text: secondText,
-      reply: {
-        root: firstPost,
-        parent: firstPost
-      }
+      reply: { root: firstPost, parent: firstPost }
     });
     
     return res.json({ ok: true });
   } catch(err) {
-    next(err);
+    return next(err);
   }
 });
 
 app.use((err, _req, res, _next) => {
   console.error('--- unhandled error ---');
   console.error(err);
-  res.status(500).json({ 
-    error: err.name || 'ServerError',
-    message: err.message,
-  });
+  res.status(500).json({ error: err.name || 'ServerError', message: err.message });
+});
+
+app.listen(PORT, () => {
+  console.log(`web listening on :${PORT}`);
 });
 
 app.listen(PORT, () => {
