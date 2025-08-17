@@ -168,13 +168,13 @@ app.post('/post-thread', async (req, res, next) => {
     if (token !== INTERNAL_API_TOKEN) {
       return res.status(403).json({ error: 'forbidden' });
     }
-    
+
     const { firstText, secondText } = req.body;
     if (!firstText || !secondText) {
       return res.status(400).json({ error: 'missing firstText or secondText' });
     }
-    
-    // FIX: Get the whole session object
+
+    // Get the whole session object
     const row = await pg.query(`SELECT session_json FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
     if (!row.rowCount) {
       return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
@@ -183,7 +183,7 @@ app.post('/post-thread', async (req, res, next) => {
 
     const liveSession = await client.restore(session);
     const agent = new Agent({ service: 'https://bsky.social', auth: liveSession });
-    
+
     const firstPost = await agent.post({ text: firstText });
     await agent.post({
       text: secondText,
@@ -192,13 +192,7 @@ app.post('/post-thread', async (req, res, next) => {
         parent: firstPost
       }
     });
-    
-    return res.json({ ok: true });
-  } catch(err) {
-    return next(err);
-  }
-});
-    
+
     return res.json({ ok: true });
   } catch(err) {
     return next(err);
