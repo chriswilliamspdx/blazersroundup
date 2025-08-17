@@ -119,17 +119,23 @@ app.get('/auth/start', async (req, res, next) => {
 app.get('/oauth/callback', async (req, res, next) => {
   try {
     const params = new URLSearchParams(req.url.split('?')[1] || '');
-    const { session } = await client.callback(params);
+    const result = await client.callback(params);
 
-    // CRITICAL FIX: Store only the serializable session object, not the wrapper!
-    await sessionStore.set(session.did, session.session);
+    // In latest @atproto/oauth-client-node, result might be:
+    // { session, ... } or just the session object directly
+    // So store either result.session (if present) or result
+    const sessionObj = result.session || result;
+    if (!sessionObj || typeof sessionObj !== 'object' || !sessionObj.access_token) {
+      throw new Error('OAuth callback did not return a valid session object.');
+    }
 
-    // Use the session object for Agent
-    const agent = new Agent({ service: 'https://bsky.social', ...session.session });
-    const profile = await agent.getProfile({ actor: session.session.did }).catch(() => null);
-    
+    await sessionStore.set(sessionObj.did, sessionObj);
+
+    const agent = new Agent({ service: 'https://bsky.social', ...sessionObj });
+    const profile = await agent.getProfile({ actor: sessionObj.did }).catch(() => null);
+
     res.type('text/plain').send(
-      `✅ SUCCESS! OAuth complete for DID: ${session.session.did}\n` +
+      `✅ SUCCESS! OAuth complete for DID: ${sessionObj.did}\n` +
       (profile ? `Logged in as: ${profile.data.handle}\n` : '') +
       `You can now close this window. The bot is authorized.`
     );
