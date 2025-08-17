@@ -37,7 +37,6 @@ CREATE TABLE IF NOT EXISTS oauth_state ( key TEXT PRIMARY KEY, value JSONB NOT N
 CREATE TABLE IF NOT EXISTS oauth_sessions ( sub TEXT PRIMARY KEY, session_json JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 `);
 
-// FIX: Corrected column names from "k" and "v" to "key" and "value" to match the database schema.
 const stateStore = {
   async set(key, internalState) { await pg.query(`INSERT INTO oauth_state(key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [key, internalState]); },
   async get(key) { const res = await pg.query(`SELECT value FROM oauth_state WHERE key = $1`, [key]); return res.rows[0]?.value; },
@@ -50,23 +49,15 @@ const sessionStore = {
 };
 
 // ------------------------------
-// NEW: PostgreSQL Advisory Lock
+// PostgreSQL Advisory Lock
 // ------------------------------
-// This object implements the lock interface required by the OAuth client.
-// It uses a single, shared advisory lock in PostgreSQL to ensure only one
-// process can perform a token refresh at a time.
 const pgLock = {
   async lock() {
     const client = await pg.connect();
-    // pg_advisory_lock is session-scoped. It will be automatically
-    // released when the client connection is closed.
     await client.query('SELECT pg_advisory_lock(1)');
-    // We return the client itself, which will be passed to `unlock`.
     return client;
   },
   async unlock(lock) {
-    // `lock` here is the `client` we returned from the `lock` function.
-    // Releasing the client back to the pool automatically releases the lock.
     lock.release();
   },
 };
@@ -108,7 +99,6 @@ app.get('/auth/start', async (req, res, next) => {
   try {
     const handle = (req.query.handle || BSKY_EXPECTED_HANDLE)?.toString().replace(/^@/, '');
     if (!handle) return res.status(400).send('missing ?handle');
-    
     const url = await client.authorize(handle);
     return res.redirect(url);
   } catch (err) {
@@ -121,7 +111,7 @@ app.get('/oauth/callback', async (req, res, next) => {
     const params = new URLSearchParams(req.url.split('?')[1] || '');
     const session = await client.callback(params);
 
-    // Optional: log for debugging
+    // Debug: log the session returned
     console.log('OAUTH CALLBACK RESULT:', session);
 
     if (!session || typeof session !== 'object' || !session.access_token) {
@@ -149,20 +139,16 @@ app.post('/post-thread', async (req, res, next) => {
     if (token !== INTERNAL_API_TOKEN) {
       return res.status(403).json({ error: 'forbidden' });
     }
-    
     const { firstText, secondText } = req.body;
     if (!firstText || !secondText) {
       return res.status(400).json({ error: 'missing firstText or secondText' });
     }
-    
     const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
     if (!row.rowCount) {
       return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
     }
-    
     const liveSession = await client.restore(row.rows[0].sub);
     const agent = new Agent({ service: 'https://bsky.social', auth: liveSession });
-    
     const firstPost = await agent.post({ text: firstText });
     await agent.post({
       text: secondText,
@@ -171,7 +157,6 @@ app.post('/post-thread', async (req, res, next) => {
         parent: firstPost
       }
     });
-    
     return res.json({ ok: true });
   } catch(err) {
     return next(err);
