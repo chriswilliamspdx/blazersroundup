@@ -38,20 +38,9 @@ CREATE TABLE IF NOT EXISTS oauth_sessions ( sub TEXT PRIMARY KEY, value JSONB NO
 `);
 
 const stateStore = {
-  async set(key, internalState) {
-    await pg.query(
-      `INSERT INTO oauth_state(k, v) VALUES ($1, $2)
-       ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v`,
-      [key, internalState],
-    )
-  },
-  async get(key) {
-    const res = await pg.query(`SELECT v FROM oauth_state WHERE k = $1`, [key])
-    return res.rows[0]?.v
-  },
-  async del(key) {
-    await pg.query(`DELETE FROM oauth_state WHERE k = $1`, [key])
-  },
+  async set(key, internalState) { await pg.query(`INSERT INTO oauth_state(k, v) VALUES ($1, $2) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v`, [key, internalState]); },
+  async get(key) { const res = await pg.query(`SELECT v FROM oauth_state WHERE k = $1`, [key]); return res.rows[0]?.v; },
+  async del(key) { await pg.query(`DELETE FROM oauth_state WHERE k = $1`, [key]); },
 };
 const sessionStore = {
   async set(sub, sessionData) { await pg.query(`INSERT INTO oauth_sessions(sub, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (sub) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, [sub, sessionData]); },
