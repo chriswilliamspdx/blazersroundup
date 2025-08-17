@@ -85,15 +85,12 @@ const sessionStore = {
 const keyJwk = JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK);
 const signingKey = await JoseKey.fromImportable(keyJwk, BSKY_OAUTH_KID);
 
-const clientMetadataResponse = await fetch(CLIENT_METADATA_URL);
-if (!clientMetadataResponse.ok) {
-  throw new Error(`Failed to fetch client metadata: ${clientMetadataResponse.statusText}`)
-}
-const clientMetadata = await clientMetadataResponse.json();
+const clientMetadata = {
+  client_id: CLIENT_METADATA_URL,
+};
 
 const client = new NodeOAuthClient({
   clientMetadata,
-  keyset: [signingKey],
   stateStore,
   sessionStore,
 });
@@ -116,20 +113,18 @@ app.get('/auth/start', async (req, res, next) => {
     const handle = (req.query.handle || BSKY_EXPECTED_HANDLE)?.toString();
     if (!handle) return res.status(400).send('missing ?handle');
     
-    const url = await client.authorize(handle);
+    const url = await client.authorize(handle, { signingKey });
     return res.redirect(url);
   } catch (err) {
     return next(err);
   }
 });
 
-// FIX: Replaced `client.callback` with the correct `client.validateCallback` method.
 app.get('/oauth/callback', async (req, res, next) => {
   try {
     const callbackUrl = new URL(req.url, WEB_BASE_URL).toString();
     const session = await client.validateCallback(callbackUrl, { signingKey });
 
-    // After successful validation, we must save the session.
     await sessionStore.set(session.did, session);
 
     const agent = new Agent({ service: 'https://bsky.social', session });
@@ -144,7 +139,6 @@ app.get('/oauth/callback', async (req, res, next) => {
     return next(err);
   }
 });
-
 
 app.post('/post-thread', async (req, res, next) => {
   try {
@@ -163,8 +157,8 @@ app.post('/post-thread', async (req, res, next) => {
       return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
     }
     
-    const session = await client.restore(row.rows[0].sub);
-    const agent = new Agent({ service: 'https://bsky.social', ...session });
+    const session = await client.restore(row.rows[0].sub, { signingKey });
+    const agent = new Agent({ service: 'https://bsky.social', session });
     
     const firstPost = await agent.post({ text: firstText });
     await agent.post({
@@ -190,6 +184,9 @@ app.use((err, _req, res, _next) => {
   });
 });
 
+app.listen(PORT, () => {
+  console.log(`web listening on :${PORT}`);
+});
 app.listen(PORT, () => {
   console.log(`web listening on :${PORT}`);
 });
