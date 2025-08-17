@@ -34,7 +34,7 @@ const pg = new Pool({ connectionString: DATABASE_URL });
 
 await pg.query(`
 CREATE TABLE IF NOT EXISTS oauth_state ( key TEXT PRIMARY KEY, value JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
-CREATE TABLE IF NOT EXISTS oauth_sessions ( sub TEXT PRIMARY KEY, value JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS oauth_sessions ( sub TEXT PRIMARY KEY, session_json JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 `);
 
 const stateStore = {
@@ -46,6 +46,28 @@ const sessionStore = {
   async set(sub, sessionData) { await pg.query(`INSERT INTO oauth_sessions(sub, session_json, updated_at) VALUES ($1, $2, now()) ON CONFLICT (sub) DO UPDATE SET session_json = EXCLUDED.session_json, updated_at = now()`, [sub, sessionData]); },
   async get(sub) { const res = await pg.query(`SELECT session_json FROM oauth_sessions WHERE sub = $1`, [sub]); return res.rows[0]?.session_json; },
   async del(sub) { await pg.query(`DELETE FROM oauth_sessions WHERE sub = $1`, [sub]); },
+};
+
+// ------------------------------
+// NEW: PostgreSQL Advisory Lock
+// ------------------------------
+// This object implements the lock interface required by the OAuth client.
+// It uses a single, shared advisory lock in PostgreSQL to ensure only one
+// process can perform a token refresh at a time.
+const pgLock = {
+  async lock() {
+    const client = await pg.connect();
+    // pg_advisory_lock is session-scoped. It will be automatically
+    // released when the client connection is closed.
+    await client.query('SELECT pg_advisory_lock(1)');
+    // We return the client itself, which will be passed to `unlock`.
+    return client;
+  },
+  async unlock(lock) {
+    // `lock` here is the `client` we returned from the `lock` function.
+    // Releasing the client back to the pool automatically releases the lock.
+    lock.release();
+  },
 };
 
 // ------------------------------
@@ -65,6 +87,7 @@ const client = new NodeOAuthClient({
   keyset: [signingKey],
   stateStore,
   sessionStore,
+  lock: pgLock, // FIX: Pass the new PostgreSQL lock mechanism to the client.
 });
 
 const app = express();
@@ -76,7 +99,7 @@ app.use(express.json());
 app.get('/', (_req, res) => res.type('text/plain').send('ok'));
 
 app.get('/session/debug', async (_req, res) => {
-  const row = await pg.query(`SELECT sub, value, updated_at FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
+  const row = await pg.query(`SELECT sub, session_json, updated_at FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
   res.json({ haveSession: row.rowCount > 0, session: row.rows[0] || null });
 });
 
@@ -112,7 +135,6 @@ app.get('/oauth/callback', async (req, res, next) => {
   }
 });
 
-// FIX: This route is the only part that has been changed.
 app.post('/post-thread', async (req, res, next) => {
   try {
     const token = req.get('X-Internal-Token') || '';
@@ -130,9 +152,7 @@ app.post('/post-thread', async (req, res, next) => {
       return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
     }
     
-    // The `restore` method returns a live, refreshable session object.
     const liveSession = await client.restore(row.rows[0].sub);
-    // The agent must be created with the `auth` property pointing to the live session.
     const agent = new Agent({ service: 'https://bsky.social', auth: liveSession });
     
     const firstPost = await agent.post({ text: firstText });
