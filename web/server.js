@@ -125,15 +125,15 @@ app.post('/post-thread', async (req, res, next) => {
       return res.status(400).json({ error: 'missing firstText or secondText' });
     }
     
-    // FIX: Instead of using client.restore(), we will fetch the session data directly.
-    const row = await pg.query(`SELECT session_json FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
+    const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
     if (!row.rowCount) {
-      return res.status(401).json({ error: 'OAuth session not found. Please authorize the bot again.' });
+      return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
     }
     
-    // FIX: Create the agent directly from the session data stored in the database.
-    // This is a more direct and reliable method that avoids the TokenRefreshError.
-    const agent = new Agent({ service: 'https://bsky.social', ...row.rows[0].session_json });
+    // The `restore` method returns a live, refreshable session object.
+    const liveSession = await client.restore(row.rows[0].sub);
+    // The agent must be created with the `auth` property pointing to the live session.
+    const agent = new Agent({ service: 'https://bsky.social', auth: liveSession });
     
     const firstPost = await agent.post({ text: firstText });
     await agent.post({
