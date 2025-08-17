@@ -1,4 +1,4 @@
-// web/server.js (ESM) - Self-Contained OAuth Server
+// web/server.js (ESM) - Bluesky OAuth + Posting API
 import express from 'express';
 import { Pool } from 'pg';
 import { randomUUID } from 'node:crypto';
@@ -13,18 +13,19 @@ import { Agent } from '@atproto/api';
 const {
   PORT = 8080,
   DATABASE_URL,
-  CLIENT_METADATA_URL, // The public URL of THIS server's /bsky-client.json endpoint
+  CLIENT_METADATA_URL,
+  WEB_BASE_URL,
   BSKY_OAUTH_PRIVATE_KEY_JWK,
   BSKY_OAUTH_KID,
   BSKY_EXPECTED_HANDLE,
   INTERNAL_API_TOKEN,
 } = process.env;
 
-if (!DATABASE_URL || !CLIENT_METADATA_URL || !BSKY_OAUTH_PRIVATE_KEY_JWK || !INTERNAL_API_TOKEN) {
-  throw new Error('Missing one or more required environment variables.');
-}
-
-const WEB_BASE_URL = new URL(CLIENT_METADATA_URL).origin;
+if (!DATABASE_URL) throw new Error('Missing DATABASE_URL');
+if (!CLIENT_METADATA_URL) throw new Error('Missing CLIENT_METADATA_URL');
+if (!WEB_BASE_URL) throw new Error('Missing WEB_BASE_URL');
+if (!BSKY_OAUTH_PRIVATE_KEY_JWK) throw new Error('Missing BSKY_OAUTH_PRIVATE_KEY_JWK');
+if (!INTERNAL_API_TOKEN) throw new Error('Missing INTERNAL_API_TOKEN');
 
 // ------------------------------
 // Postgres Setup
@@ -52,20 +53,12 @@ const sessionStore = {
 // ------------------------------
 const keyJwk = JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK);
 const signingKey = await JoseKey.fromImportable(keyJwk, BSKY_OAUTH_KID);
-const publicJwk = await signingKey.toPublicJwk();
-if (!publicJwk.kid) publicJwk.kid = signingKey.kid;
 
-const clientMetadata = {
-  client_id: CLIENT_METADATA_URL,
-  client_name: 'Blazers Roundup Bot',
-  redirect_uris: [new URL('/oauth/callback', WEB_BASE_URL).toString()],
-  jwks_uri: new URL('/jwks.json', WEB_BASE_URL).toString(),
-  grant_types: ['authorization_code', 'refresh_token'],
-  response_types: ['code'],
-  scope: 'atproto',
-  token_endpoint_auth_method: 'private_key_jwt',
-  token_endpoint_auth_signing_alg: 'ES256',
-};
+const clientMetadataResponse = await fetch(CLIENT_METADATA_URL);
+if (!clientMetadataResponse.ok) {
+  throw new Error(`Failed to fetch client metadata: ${clientMetadataResponse.statusText}`)
+}
+const clientMetadata = await clientMetadataResponse.json();
 
 const client = new NodeOAuthClient({
   clientMetadata,
@@ -78,27 +71,21 @@ const app = express();
 app.use(express.json());
 
 // ------------------------------
-// Self-Hosted Metadata Endpoints
-// ------------------------------
-app.get('/bsky-client.json', (_req, res) => {
-  res.json(clientMetadata);
-});
-
-app.get('/jwks.json', (_req, res) => {
-  res.json({ keys: [publicJwk] });
-});
-
-// ------------------------------
 // Routes
 // ------------------------------
 app.get('/', (_req, res) => res.type('text/plain').send('ok'));
+
+app.get('/session/debug', async (_req, res) => {
+  const row = await pg.query(`SELECT sub, value, updated_at FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
+  res.json({ haveSession: row.rowCount > 0, session: row.rows[0] || null });
+});
 
 app.get('/auth/start', async (req, res, next) => {
   try {
     const handle = (req.query.handle || BSKY_EXPECTED_HANDLE)?.toString();
     if (!handle) return res.status(400).send('missing ?handle');
     
-    const url = await client.authorize(handle, { signingKey });
+    const url = await client.authorize(handle);
     return res.redirect(url);
   } catch (err) {
     return next(err);
@@ -108,7 +95,7 @@ app.get('/auth/start', async (req, res, next) => {
 app.get('/oauth/callback', async (req, res, next) => {
   try {
     const callbackUrl = new URL(req.url, WEB_BASE_URL).toString();
-    const { session } = await client.validateCallback(callbackUrl, { signingKey });
+    const session = await client.validateCallback(callbackUrl, { signingKey });
 
     await sessionStore.set(session.did, session);
 
@@ -125,7 +112,7 @@ app.get('/oauth/callback', async (req, res, next) => {
   }
 });
 
-app.post('/post-thread', express.json(), async (req, res, next) => {
+app.post('/post-thread', async (req, res, next) => {
   try {
     const token = req.get('X-Internal-Token') || '';
     if (token !== INTERNAL_API_TOKEN) return res.status(403).json({ error: 'forbidden' });
