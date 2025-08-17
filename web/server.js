@@ -125,31 +125,25 @@ app.get('/oauth/callback', async (req, res, next) => {
     console.log('OAUTH CALLBACK RAW RESULT:', result);
 
     const session = result.session;
-
     if (!session || typeof session !== 'object' || !session.sub) {
       throw new Error('OAuth callback did not return a valid session object.');
     }
 
-    // Safely save only the plain serializable fields
+    // Safely extract only serializable fields and force did/sub to be strings
     let serializable;
     if (typeof session.toJSON === 'function') {
       serializable = session.toJSON();
     } else {
-      serializable = {
-        access_token: session.access_token,
-        refresh_token: session.refresh_token,
-        expires_at: session.expires_at,
-        handle: session.handle,
-        sub: session.sub,
-        did: typeof session.did === 'string' ? session.did : session.sub, // <-- force did as string
-        scope: session.scope,
-        token_type: session.token_type,
-      };
+      serializable = { ...session };
     }
-    // Extra protection: ensure serializable.did is a string!
-    if (typeof serializable.did !== 'string') {
-      serializable.did = serializable.sub;
-    }
+    // Force 'did' and 'sub' to be strings!
+    serializable.did = typeof serializable.did === 'string'
+      ? serializable.did
+      : (typeof serializable.sub === 'string' ? serializable.sub : String(serializable.did));
+    serializable.sub = typeof serializable.sub === 'string'
+      ? serializable.sub
+      : (typeof serializable.did === 'string' ? serializable.did : String(serializable.sub));
+
     await sessionStore.set(serializable.sub, serializable);
 
     const agent = new Agent({ service: 'https://bsky.social', ...serializable });
