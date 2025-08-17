@@ -119,9 +119,11 @@ app.get('/auth/start', async (req, res, next) => {
 app.get('/oauth/callback', async (req, res, next) => {
   try {
     const params = new URLSearchParams(req.url.split('?')[1] || '');
+    console.log('OAUTH CALLBACK PARAMS:', params.toString());
 
     // Per Bluesky docs, client.callback(params) returns the session directly
     const session = await client.callback(params);
+    console.log('OAUTH CALLBACK RAW RESULT:', session);
 
     if (!session || typeof session !== 'object' || !session.access_token) {
       throw new Error('OAuth callback did not return a valid session object.');
