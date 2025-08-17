@@ -37,10 +37,11 @@ CREATE TABLE IF NOT EXISTS oauth_state ( key TEXT PRIMARY KEY, value JSONB NOT N
 CREATE TABLE IF NOT EXISTS oauth_sessions ( sub TEXT PRIMARY KEY, session_json JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 `);
 
+// FIX: Corrected column names from "k" and "v" to "key" and "value" to match the database schema.
 const stateStore = {
-  async set(key, internalState) { await pg.query(`INSERT INTO oauth_state(k, v) VALUES ($1, $2) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v`, [key, internalState]); },
-  async get(key) { const res = await pg.query(`SELECT v FROM oauth_state WHERE k = $1`, [key]); return res.rows[0]?.v; },
-  async del(key) { await pg.query(`DELETE FROM oauth_state WHERE k = $1`, [key]); },
+  async set(key, internalState) { await pg.query(`INSERT INTO oauth_state(key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [key, internalState]); },
+  async get(key) { const res = await pg.query(`SELECT value FROM oauth_state WHERE key = $1`, [key]); return res.rows[0]?.value; },
+  async del(key) { await pg.query(`DELETE FROM oauth_state WHERE key = $1`, [key]); },
 };
 const sessionStore = {
   async set(sub, sessionData) { await pg.query(`INSERT INTO oauth_sessions(sub, session_json, updated_at) VALUES ($1, $2, now()) ON CONFLICT (sub) DO UPDATE SET session_json = EXCLUDED.session_json, updated_at = now()`, [sub, sessionData]); },
@@ -87,7 +88,7 @@ const client = new NodeOAuthClient({
   keyset: [signingKey],
   stateStore,
   sessionStore,
-  lock: pgLock, // FIX: Pass the new PostgreSQL lock mechanism to the client.
+  lock: pgLock, 
 });
 
 const app = express();
