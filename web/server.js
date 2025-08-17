@@ -13,8 +13,8 @@ import { Agent } from '@atproto/api';
 const {
   PORT = 8080,
   DATABASE_URL,
-  CLIENT_METADATA_URL, // This is now ONLY used as the official ID for our app
-  WEB_BASE_URL,
+  CLIENT_METADATA_URL, // This is the public ID of our application
+  WEB_BASE_URL,      // This is the URL of THIS server
   BSKY_OAUTH_PRIVATE_KEY_JWK,
   BSKY_OAUTH_KID,
   BSKY_EXPECTED_HANDLE,
@@ -196,9 +196,6 @@ app.use((err, _req, res, _next) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`web listening on :${PORT}`);
-});
 app.listen(PORT, () => {
   console.log(`web listening on :${PORT}`);
 });
