@@ -82,7 +82,6 @@ app.get('/session/debug', async (_req, res) => {
 
 app.get('/auth/start', async (req, res, next) => {
   try {
-    // FIX: The handle must not have an "@" prefix for identity resolution.
     const handle = (req.query.handle || BSKY_EXPECTED_HANDLE)?.toString().replace(/^@/, '');
     if (!handle) return res.status(400).send('missing ?handle');
     
@@ -113,6 +112,7 @@ app.get('/oauth/callback', async (req, res, next) => {
   }
 });
 
+// FIX: This route is the only part that has been changed.
 app.post('/post-thread', async (req, res, next) => {
   try {
     const token = req.get('X-Internal-Token') || '';
@@ -125,15 +125,15 @@ app.post('/post-thread', async (req, res, next) => {
       return res.status(400).json({ error: 'missing firstText or secondText' });
     }
     
-    // FIX: Correctly fetch the full session data from the database.
-    const row = await pg.query(`SELECT value FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
+    const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
     if (!row.rowCount) {
       return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
     }
     
-    // FIX: Create the agent directly from the stored session data.
-    const session = row.rows[0].value;
-    const agent = new Agent({ service: 'https://bsky.social', session });
+    // The `restore` method returns a live, refreshable session object.
+    const liveSession = await client.restore(row.rows[0].sub);
+    // The agent must be created with the `auth` property pointing to the live session.
+    const agent = new Agent({ service: 'https://bsky.social', auth: liveSession });
     
     const firstPost = await agent.post({ text: firstText });
     await agent.post({
