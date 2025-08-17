@@ -174,12 +174,14 @@ app.post('/post-thread', async (req, res, next) => {
       return res.status(400).json({ error: 'missing firstText or secondText' });
     }
     
-    const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
+    // FIX: Get the whole session object
+    const row = await pg.query(`SELECT session_json FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
     if (!row.rowCount) {
       return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
     }
-    
-    const liveSession = await client.restore(row.rows[0].sub);
+    const session = row.rows[0].session_json;
+
+    const liveSession = await client.restore(session);
     const agent = new Agent({ service: 'https://bsky.social', auth: liveSession });
     
     const firstPost = await agent.post({ text: firstText });
@@ -190,6 +192,12 @@ app.post('/post-thread', async (req, res, next) => {
         parent: firstPost
       }
     });
+    
+    return res.json({ ok: true });
+  } catch(err) {
+    return next(err);
+  }
+});
     
     return res.json({ ok: true });
   } catch(err) {
