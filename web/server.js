@@ -82,8 +82,6 @@ const sessionStore = {
 // ------------------------------
 // OAuth Client Setup
 // ------------------------------
-// This new strategy builds the metadata object directly in the code.
-// This removes any potential for errors from fetching external files.
 const keyJwk = JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK);
 const signingKey = await JoseKey.fromImportable(keyJwk, BSKY_OAUTH_KID);
 
@@ -198,6 +196,9 @@ app.use((err, _req, res, _next) => {
   });
 });
 
+app.listen(PORT, () => {
+  console.log(`web listening on :${PORT}`);
+});
 app.listen(PORT, () => {
   console.log(`web listening on :${PORT}`);
 });
