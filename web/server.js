@@ -43,8 +43,8 @@ const stateStore = {
   async del(key) { await pg.query(`DELETE FROM oauth_state WHERE k = $1`, [key]); },
 };
 const sessionStore = {
-  async set(sub, sessionData) { await pg.query(`INSERT INTO oauth_sessions(sub, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (sub) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, [sub, sessionData]); },
-  async get(sub) { const res = await pg.query(`SELECT value FROM oauth_sessions WHERE sub = $1`, [sub]); return res.rows[0]?.value; },
+  async set(sub, sessionData) { await pg.query(`INSERT INTO oauth_sessions(sub, session_json, updated_at) VALUES ($1, $2, now()) ON CONFLICT (sub) DO UPDATE SET session_json = EXCLUDED.session_json, updated_at = now()`, [sub, sessionData]); },
+  async get(sub) { const res = await pg.query(`SELECT session_json FROM oauth_sessions WHERE sub = $1`, [sub]); return res.rows[0]?.session_json; },
   async del(sub) { await pg.query(`DELETE FROM oauth_sessions WHERE sub = $1`, [sub]); },
 };
 
