@@ -114,38 +114,40 @@ app.get('/oauth/callback', async (req, res, next) => {
 
 // FIX: This route is the only part that has been changed.
 app.post('/post-thread', async (req, res, next) => {
-  try {
-    const token = req.get('X-Internal-Token') || '';
-    if (token !== INTERNAL_API_TOKEN) {
-      return res.status(403).json({ error: 'forbidden' });
-    }
-
-    const { firstText, secondText } = req.body;
-    if (!firstText || !secondText) {
-      return res.status(400).json({ error: 'missing firstText or secondText' });
-    }
-
-    const row = await pg.query(`SELECT value FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
-    if (!row.rowCount) {
-      return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
-    }
-
-    const session = row.rows[0].value;
-    const agent = new Agent({ service: 'https://bsky.social', session });
-
-    const firstPost = await agent.post({ text: firstText });
-    await agent.post({
-      text: secondText,
-      reply: {
-        root: firstPost,
-        parent: firstPost
-      }
-    });
-
-    return res.json({ ok: true });
-  } catch(err) {
-    return next(err);
-  }
+  try {
+    const token = req.get('X-Internal-Token') || '';
+    if (token !== INTERNAL_API_TOKEN) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+    
+    const { firstText, secondText } = req.body;
+    if (!firstText || !secondText) {
+      return res.status(400).json({ error: 'missing firstText or secondText' });
+    }
+    
+    const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
+    if (!row.rowCount) {
+      return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
+    }
+    
+    // The `restore` method returns a live, refreshable session object.
+    const liveSession = await client.restore(row.rows[0].sub);
+    // The agent must be created with the `auth` property pointing to the live session.
+    const agent = new Agent({ service: 'https://bsky.social', auth: liveSession });
+    
+    const firstPost = await agent.post({ text: firstText });
+    await agent.post({
+      text: secondText,
+      reply: {
+        root: firstPost,
+        parent: firstPost
+      }
+    });
+    
+    return res.json({ ok: true });
+  } catch(err) {
+    next(err);
+  }
 });
 
 app.use((err, _req, res, _next) => {
