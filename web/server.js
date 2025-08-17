@@ -43,9 +43,20 @@ const stateStore = {
   async del(key) { await pg.query(`DELETE FROM oauth_state WHERE k = $1`, [key]); },
 };
 const sessionStore = {
-  async set(sub, sessionData) { await pg.query(`INSERT INTO oauth_sessions(sub, session_json, updated_at) VALUES ($1, $2, now()) ON CONFLICT (sub) DO UPDATE SET session_json = EXCLUDED.session_json, updated_at = now()`, [sub, sessionData]); },
-  async get(sub) { const res = await pg.query(`SELECT session_json FROM oauth_sessions WHERE sub = $1`, [sub]); return res.rows[0]?.session_json; },
-  async del(sub) { await pg.query(`DELETE FROM oauth_sessions WHERE sub = $1`, [sub]); },
+    async set(sub, sessionData) {
+        await pg.query(
+            `INSERT INTO oauth_sessions(sub, value, updated_at) VALUES ($1, $2, now())
+             ON CONFLICT (sub) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+            [sub, sessionData]
+        );
+    },
+    async get(sub) {
+        const res = await pg.query(`SELECT value FROM oauth_sessions WHERE sub = $1`, [sub]);
+        return res.rows[0]?.value;
+    },
+    async del(sub) {
+        await pg.query(`DELETE FROM oauth_sessions WHERE sub = $1`, [sub]);
+    },
 };
 
 // ------------------------------
@@ -119,22 +130,20 @@ app.post('/post-thread', async (req, res, next) => {
     if (token !== INTERNAL_API_TOKEN) {
       return res.status(403).json({ error: 'forbidden' });
     }
-    
+
     const { firstText, secondText } = req.body;
     if (!firstText || !secondText) {
       return res.status(400).json({ error: 'missing firstText or secondText' });
     }
-    
-    const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
+
+    const row = await pg.query(`SELECT value FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
     if (!row.rowCount) {
       return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
     }
-    
-    // The `restore` method returns a live, refreshable session object.
-    const liveSession = await client.restore(row.rows[0].sub);
-    // The agent must be created with the `auth` property pointing to the live session.
-    const agent = new Agent({ service: 'https://bsky.social', auth: liveSession });
-    
+
+    const session = row.rows[0].value;
+    const agent = new Agent({ service: 'https://bsky.social', session });
+
     const firstPost = await agent.post({ text: firstText });
     await agent.post({
       text: secondText,
@@ -143,7 +152,7 @@ app.post('/post-thread', async (req, res, next) => {
         parent: firstPost
       }
     });
-    
+
     return res.json({ ok: true });
   } catch(err) {
     return next(err);
