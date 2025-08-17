@@ -38,20 +38,9 @@ CREATE TABLE IF NOT EXISTS oauth_sessions ( sub TEXT PRIMARY KEY, value JSONB NO
 `);
 
 const stateStore = {
-  async set(key, internalState) {
-    await pg.query(
-      `INSERT INTO oauth_state(k, v) VALUES ($1, $2)
-       ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v`,
-      [key, internalState],
-    )
-  },
-  async get(key) {
-    const res = await pg.query(`SELECT v FROM oauth_state WHERE k = $1`, [key])
-    return res.rows[0]?.v
-  },
-  async del(key) {
-    await pg.query(`DELETE FROM oauth_state WHERE k = $1`, [key])
-  },
+  async set(key, internalState) { await pg.query(`INSERT INTO oauth_state(key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [key, internalState]); },
+  async get(key) { const res = await pg.query(`SELECT value FROM oauth_state WHERE key = $1`, [key]); return res.rows[0]?.value; },
+  async del(key) { await pg.query(`DELETE FROM oauth_state WHERE key = $1`, [key]); },
 };
 const sessionStore = {
   async set(sub, sessionData) { await pg.query(`INSERT INTO oauth_sessions(sub, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (sub) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, [sub, sessionData]); },
@@ -93,8 +82,7 @@ app.get('/session/debug', async (_req, res) => {
 
 app.get('/auth/start', async (req, res, next) => {
   try {
-    // FIX: The handle must not have an "@" prefix. This is the new, targeted fix.
-    const handle = (req.query.handle || BSKY_EXPECTED_HANDLE)?.toString().replace(/^@/, '');
+    const handle = (req.query.handle || BSKY_EXPECTED_HANDLE)?.toString();
     if (!handle) return res.status(400).send('missing ?handle');
     
     const url = await client.authorize(handle);
@@ -106,12 +94,13 @@ app.get('/auth/start', async (req, res, next) => {
 
 app.get('/oauth/callback', async (req, res, next) => {
   try {
-    const callbackUrl = new URL(req.url, WEB_BASE_URL).toString();
-    const session = await client.validateCallback(callbackUrl, { signingKey });
+    // FIX: Using .callback() which is the correct method for your library version.
+    const params = new URLSearchParams(req.url.split('?')[1] || '');
+    const { session } = await client.callback(params);
 
     await sessionStore.set(session.did, session);
 
-    const agent = new Agent({ service: 'https://bsky.social', session });
+    const agent = new Agent({ service: 'https://bsky.social', ...session });
     const profile = await agent.getProfile({ actor: session.did }).catch(() => null);
     
     res.type('text/plain').send(
@@ -135,8 +124,8 @@ app.post('/post-thread', async (req, res, next) => {
     const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
     if (!row.rowCount) return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
     
-    const session = await client.restore(row.rows[0].sub, { signingKey });
-    const agent = new Agent({ service: 'https://bsky.social', session });
+    const session = await client.restore(row.rows[0].sub);
+    const agent = new Agent({ service: 'https://bsky.social', ...session });
     
     const firstPost = await agent.post({ text: firstText });
     await agent.post({ text: secondText, reply: { root: firstPost, parent: firstPost }});
@@ -150,7 +139,10 @@ app.post('/post-thread', async (req, res, next) => {
 app.use((err, _req, res, _next) => {
   console.error('--- unhandled error ---');
   console.error(err);
-  res.status(500).json({ error: err.name || 'ServerError', message: err.message });
+  res.status(500).json({ 
+    error: err.name || 'ServerError',
+    message: err.message,
+  });
 });
 
 app.listen(PORT, () => {
