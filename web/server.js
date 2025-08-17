@@ -122,7 +122,8 @@ app.get('/session/debug', async (_req, res) => {
 
 app.get('/auth/start', async (req, res, next) => {
   try {
-    const handle = (req.query.handle || BSKY_EXPECTED_HANDLE)?.toString();
+    // FIX: Bypass handle resolution by using the DID directly.
+const handle = 'did:plc:pwh557k2hzyusynp6q4i5wdb';
     if (!handle) return res.status(400).send('missing ?handle');
     
     const url = await client.authorize(handle);
