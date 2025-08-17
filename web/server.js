@@ -135,19 +135,22 @@ app.get('/oauth/callback', async (req, res, next) => {
     if (typeof session.toJSON === 'function') {
       serializable = session.toJSON();
     } else {
-      // fallback: pick common fields manually
       serializable = {
         access_token: session.access_token,
         refresh_token: session.refresh_token,
         expires_at: session.expires_at,
         handle: session.handle,
         sub: session.sub,
-        did: session.did,
+        did: typeof session.did === 'string' ? session.did : session.sub, // <-- force did as string
         scope: session.scope,
         token_type: session.token_type,
       };
     }
-    await sessionStore.set(session.sub, serializable);
+    // Extra protection: ensure serializable.did is a string!
+    if (typeof serializable.did !== 'string') {
+      serializable.did = serializable.sub;
+    }
+    await sessionStore.set(serializable.sub, serializable);
 
     const agent = new Agent({ service: 'https://bsky.social', ...serializable });
     const profile = await agent.getProfile({ actor: serializable.sub || serializable.did }).catch(() => null);
