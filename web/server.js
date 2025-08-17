@@ -121,13 +121,15 @@ app.get('/oauth/callback', async (req, res, next) => {
     const params = new URLSearchParams(req.url.split('?')[1] || '');
     const { session } = await client.callback(params);
 
-    await sessionStore.set(session.did, session);
+    // CRITICAL FIX: Store only the serializable session object, not the wrapper!
+    await sessionStore.set(session.did, session.session);
 
-    const agent = new Agent({ service: 'https://bsky.social', ...session });
-    const profile = await agent.getProfile({ actor: session.did }).catch(() => null);
+    // Use the session object for Agent
+    const agent = new Agent({ service: 'https://bsky.social', ...session.session });
+    const profile = await agent.getProfile({ actor: session.session.did }).catch(() => null);
     
     res.type('text/plain').send(
-      `✅ SUCCESS! OAuth complete for DID: ${session.did}\n` +
+      `✅ SUCCESS! OAuth complete for DID: ${session.session.did}\n` +
       (profile ? `Logged in as: ${profile.data.handle}\n` : '') +
       `You can now close this window. The bot is authorized.`
     );
