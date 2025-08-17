@@ -13,7 +13,7 @@ import { Agent } from '@atproto/api';
 const {
   PORT = 8080,
   DATABASE_URL,
-  CLIENT_METADATA_URL,
+  CLIENT_METADATA_URL, // This is now ONLY used as the official ID for our app
   WEB_BASE_URL,
   BSKY_OAUTH_PRIVATE_KEY_JWK,
   BSKY_OAUTH_KID,
@@ -82,16 +82,26 @@ const sessionStore = {
 // ------------------------------
 // OAuth Client Setup
 // ------------------------------
+// FIX: Instead of fetching metadata, we build it statically here.
+// This removes the network request as a point of failure.
 const keyJwk = JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK);
 const signingKey = await JoseKey.fromImportable(keyJwk, BSKY_OAUTH_KID);
 
-const clientMetadataResponse = await fetch(CLIENT_METADATA_URL);
-if (!clientMetadataResponse.ok) {
-  throw new Error(`Failed to fetch client metadata: ${clientMetadataResponse.statusText}`)
-}
-const clientMetadata = await clientMetadataResponse.json();
+const redirectUri = new URL('/oauth/callback', WEB_BASE_URL).toString();
+const jwksUri = new URL('jwks.json', CLIENT_METADATA_URL).toString();
 
-// FIX: Corrected the typo from NodeOAuth-Client to NodeOAuthClient
+const clientMetadata = {
+  client_id: CLIENT_METADATA_URL,
+  client_name: 'Blazers Roundup Bot',
+  redirect_uris: [redirectUri],
+  jwks_uri: jwksUri,
+  grant_types: ['authorization_code', 'refresh_token'],
+  response_types: ['code'],
+  scope: 'atproto',
+  token_endpoint_auth_method: 'private_key_jwt',
+  token_endpoint_auth_signing_alg: 'ES256',
+};
+
 const client = new NodeOAuthClient({
   clientMetadata,
   keyset: [signingKey],
