@@ -125,26 +125,34 @@ app.get('/oauth/callback', async (req, res, next) => {
     console.log('OAUTH CALLBACK RAW RESULT:', result);
 
     const session = result.session;
-    if (!session || typeof session !== 'object' || !session.sub) {
-      throw new Error('OAuth callback did not return a valid session object.');
+let tokenData = session;
+if (typeof session.toJSON === 'function') {
+  tokenData = session.toJSON();
+}
+// Defensive fix: If missing, hydrate using session.sessionGetter.getter()
+if (!tokenData.access_token && session.sessionGetter && typeof session.sessionGetter.getter === 'function') {
+  try {
+    const hydrated = await session.sessionGetter.getter();
+    if (hydrated && hydrated.access_token) {
+      tokenData = hydrated;
     }
+  } catch (e) {
+    console.error('Failed to hydrate tokenData from sessionGetter:', e);
+  }
+}
 
-    // Safely extract only serializable fields and force did/sub to be strings
-    let serializable;
-    if (typeof session.toJSON === 'function') {
-      serializable = session.toJSON();
-    } else {
-      serializable = { ...session };
-    }
-    // Force 'did' and 'sub' to be strings!
-    serializable.did = typeof serializable.did === 'string'
-      ? serializable.did
-      : (typeof serializable.sub === 'string' ? serializable.sub : String(serializable.did));
-    serializable.sub = typeof serializable.sub === 'string'
-      ? serializable.sub
-      : (typeof serializable.did === 'string' ? serializable.did : String(serializable.sub));
+// Now ensure did and sub are present and strings
+tokenData.did = typeof tokenData.did === 'string'
+  ? tokenData.did
+  : (typeof tokenData.sub === 'string' ? tokenData.sub : String(tokenData.did));
+tokenData.sub = typeof tokenData.sub === 'string'
+  ? tokenData.sub
+  : (typeof tokenData.did === 'string' ? tokenData.did : String(tokenData.sub));
 
-    await sessionStore.set(serializable.sub, serializable);
+// Extra logging:
+console.log('[oauth/callback] Saving tokenData:', tokenData);
+
+await sessionStore.set(tokenData.sub, tokenData);
 
     const agent = new Agent({ service: 'https://bsky.social', ...serializable });
     const profile = await agent.getProfile({ actor: serializable.sub || serializable.did }).catch(() => null);
