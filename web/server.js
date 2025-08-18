@@ -125,18 +125,35 @@ app.get('/oauth/callback', async (req, res, next) => {
     console.log('OAUTH CALLBACK RAW RESULT:', result);
 
     // --- INSERT THIS BLOCK RIGHT HERE ---
-    let hydrated = result.session;
-    if (hydrated.sessionGetter && typeof hydrated.sessionGetter.getter === 'function') {
-      hydrated = await hydrated.sessionGetter.getter();
-    }
-    hydrated.did = typeof hydrated.did === 'string'
-      ? hydrated.did
-      : (typeof hydrated.sub === 'string' ? hydrated.sub : String(hydrated.did));
-    hydrated.sub = typeof hydrated.sub === 'string'
-      ? hydrated.sub
-      : (typeof hydrated.did === 'string' ? hydrated.did : String(hydrated.sub));
-    console.log('[oauth/callback] tokenData to store:', hydrated);
-    await sessionStore.set(hydrated.sub, hydrated);
+    // --- Begin: Hydrate tokens, handle deleted/expired cases ---
+let hydrated = result.session;
+try {
+  if (hydrated.sessionGetter && typeof hydrated.sessionGetter.getter === 'function') {
+    hydrated = await hydrated.sessionGetter.getter();
+    console.log('[oauth/callback] hydrated tokens:', hydrated);
+  }
+} catch (err) {
+  console.error('[oauth/callback] token hydration/refresh failed:', err);
+  return res.status(401).type('text/plain').send(
+    '❌ OAuth session could not be hydrated (refresh failed or session was deleted by another process). Please re-authorize from the beginning.'
+  );
+}
+
+// Defensive: bail out if we never get usable tokens
+if (!hydrated || !hydrated.sub || typeof hydrated.sub !== 'string') {
+  return res.status(401).type('text/plain').send(
+    '❌ OAuth callback failed: No valid session/sub found after hydration. Please re-authorize.'
+  );
+}
+
+// Normalize
+hydrated.did = typeof hydrated.did === 'string'
+  ? hydrated.did
+  : hydrated.sub;
+
+console.log('[oauth/callback] tokenData to store:', hydrated);
+await sessionStore.set(hydrated.sub, hydrated);
+// --- End block ---
 
     // Now create agent with the hydrated session:
     const agent = new Agent({ service: 'https://bsky.social', auth: hydrated });
