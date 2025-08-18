@@ -124,41 +124,28 @@ app.get('/oauth/callback', async (req, res, next) => {
     const result = await client.callback(params);
     console.log('OAUTH CALLBACK RAW RESULT:', result);
 
+    // Always convert to plain object before mutating!
     const session = result.session;
-let tokenData = session;
-if (typeof session.toJSON === 'function') {
-  tokenData = session.toJSON();
-}
-// Defensive fix: If missing, hydrate using session.sessionGetter.getter()
-if (!tokenData.access_token && session.sessionGetter && typeof session.sessionGetter.getter === 'function') {
-  try {
-    const hydrated = await session.sessionGetter.getter();
-    if (hydrated && hydrated.access_token) {
-      tokenData = hydrated;
-    }
-  } catch (e) {
-    console.error('Failed to hydrate tokenData from sessionGetter:', e);
-  }
-}
+    let tokenData = (typeof session.toJSON === 'function') ? session.toJSON() : { ...session };
 
-// Now ensure did and sub are present and strings
-tokenData.did = typeof tokenData.did === 'string'
-  ? tokenData.did
-  : (typeof tokenData.sub === 'string' ? tokenData.sub : String(tokenData.did));
-tokenData.sub = typeof tokenData.sub === 'string'
-  ? tokenData.sub
-  : (typeof tokenData.did === 'string' ? tokenData.did : String(tokenData.sub));
+    // Now it's safe to assign/normalize fields
+    tokenData.did = typeof tokenData.did === 'string'
+      ? tokenData.did
+      : (typeof tokenData.sub === 'string' ? tokenData.sub : String(tokenData.did));
+    tokenData.sub = typeof tokenData.sub === 'string'
+      ? tokenData.sub
+      : (typeof tokenData.did === 'string' ? tokenData.did : String(tokenData.sub));
 
-// Extra logging:
-console.log('[oauth/callback] Saving tokenData:', tokenData);
+    // Logging just before storing in DB
+    console.log('[oauth/callback] tokenData to store:', tokenData);
 
-await sessionStore.set(tokenData.sub, tokenData);
+    await sessionStore.set(tokenData.sub, tokenData);
 
-    const agent = new Agent({ service: 'https://bsky.social', ...serializable });
-    const profile = await agent.getProfile({ actor: serializable.sub || serializable.did }).catch(() => null);
+    const agent = new Agent({ service: 'https://bsky.social', ...tokenData });
+    const profile = await agent.getProfile({ actor: tokenData.sub || tokenData.did }).catch(() => null);
 
     res.type('text/plain').send(
-      `✅ SUCCESS! OAuth complete for DID: ${serializable.sub || serializable.did}\n` +
+      `✅ SUCCESS! OAuth complete for DID: ${tokenData.sub || tokenData.did}\n` +
       (profile ? `Logged in as: ${profile.data.handle}\n` : '') +
       `You can now close this window. The bot is authorized.`
     );
