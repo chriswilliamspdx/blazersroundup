@@ -118,53 +118,17 @@ app.get('/auth/start', async (req, res, next) => {
 
 app.get('/oauth/callback', async (req, res, next) => {
   try {
-    // 1. Parse the query params from the callback
     const params = new URLSearchParams(req.url.split('?')[1] || '');
-    console.log('OAUTH CALLBACK PARAMS:', params.toString());
+    const { session } = await client.callback(params);
 
-    // 2. Perform the OAuth callback with Bluesky
-    const result = await client.callback(params);
-    console.log('OAUTH CALLBACK RAW RESULT:', result);
+    // Store the serializable session by DID in Postgres
+    await sessionStore.set(session.did, session.toJSON());
 
-    // 3. Get ONLY the safe, serializable data (strip out methods, nested objects)
-    const raw = (typeof result.session.toJSON === 'function')
-      ? result.session.toJSON()
-      : { ...result.session };
-
-    // 4. Pick only minimal fields needed for restoring
-    const sessionObj = {
-      did: typeof raw.did === 'string'
-        ? raw.did
-        : (typeof raw.sub === 'string' ? raw.sub : String(raw.did)),
-      sub: typeof raw.sub === 'string'
-        ? raw.sub
-        : (typeof raw.did === 'string' ? raw.did : String(raw.sub)),
-      handle: raw.handle,
-      access_token: raw.access_token,
-      refresh_token: raw.refresh_token,
-      expires_at: raw.expires_at,
-      // Optionally: add `scope`, `token_type`, or others if present/needed
-    };
-
-    // Defensive: ensure both did and sub are strings
-    if (!sessionObj.did || !sessionObj.sub) {
-      return res.status(401).type('text/plain').send(
-        '❌ OAuth callback failed: Missing session sub/did. Please re-authorize.'
-      );
-    }
-
-    // 5. Log and store minimal object
-    console.log('[oauth/callback] tokenData to store:', sessionObj);
-    await sessionStore.set(sessionObj.sub, sessionObj);
-
-    // 6. Test: Try to use for Agent (immediate smoke test)
-    const agent = new Agent({ service: 'https://bsky.social', auth: sessionObj });
-    const profile = await agent.getProfile({ actor: sessionObj.sub || sessionObj.did }).catch(() => null);
+    // (Optional) Debug: check what was stored
+    console.log('[oauth/callback] tokenData to store:', session.did, session.toJSON());
 
     res.type('text/plain').send(
-      `✅ SUCCESS! OAuth complete for DID: ${sessionObj.sub || sessionObj.did}\n` +
-      (profile ? `Logged in as: ${profile.data.handle}\n` : '') +
-      `You can now close this window. The bot is authorized.`
+      `✅ SUCCESS! OAuth complete for DID: ${session.did}\nYou can now close this window. The bot is authorized.`
     );
   } catch (err) {
     return next(err);
@@ -183,27 +147,16 @@ app.post('/post-thread', async (req, res, next) => {
       return res.status(400).json({ error: 'missing firstText or secondText' });
     }
 
-    // Fetch latest session row
-    const row = await pg.query(`SELECT session_json FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
+    // Always fetch the latest DID (should be session.did from storage)
+    const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
     if (!row.rowCount) {
       return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
     }
-    let session = row.rows[0].session_json;
-
-    // Defensive: ensure both did and sub are present and strings
-    session.did = typeof session.did === 'string'
-      ? session.did
-      : (typeof session.sub === 'string' ? session.sub : String(session.did));
-    session.sub = typeof session.sub === 'string'
-      ? session.sub
-      : (typeof session.did === 'string' ? session.did : String(session.sub));
-
-    // Logging: see what you’re restoring
-    console.log('[post-thread] Using session:', session);
+    const did = row.rows[0].sub;
 
     let liveSession;
     try {
-      liveSession = await client.restore(session);
+      liveSession = await client.restore(did);
     } catch (e) {
       return res.status(401).json({
         error: 'OAuth session expired or deleted. Re-authorization required.',
@@ -217,15 +170,13 @@ app.post('/post-thread', async (req, res, next) => {
       });
     }
 
+    // Fix: supply { service, auth }
     const agent = new Agent({ service: 'https://bsky.social', auth: liveSession });
 
     const firstPost = await agent.post({ text: firstText });
     await agent.post({
       text: secondText,
-      reply: {
-        root: firstPost,
-        parent: firstPost
-      }
+      reply: { root: firstPost, parent: firstPost }
     });
 
     return res.json({ ok: true });
