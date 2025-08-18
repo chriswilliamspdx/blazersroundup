@@ -121,25 +121,33 @@ app.get('/oauth/callback', async (req, res, next) => {
     const params = new URLSearchParams(req.url.split('?')[1] || '');
     console.log('OAUTH CALLBACK PARAMS:', params.toString());
 
+    // 1. Get the result and session.
     const result = await client.callback(params);
     console.log('OAUTH CALLBACK RAW RESULT:', result);
 
-    let hydrated = result.session;
-if (hydrated.sessionGetter && typeof hydrated.sessionGetter.getter === 'function') {
-  hydrated = await hydrated.sessionGetter.getter();
-}
-const toStore = (typeof hydrated.toJSON === 'function')
-  ? hydrated.toJSON()
-  : hydrated;
+    // 2. Get the serializable session object.
+    const serializable = (typeof result.session.toJSON === 'function')
+      ? result.session.toJSON()
+      : { ...result.session };
 
-console.log('[oauth/callback] tokenData to store:', toStore);
-await sessionStore.set(toStore.sub, toStore);
+    // 3. Defensive: Ensure sub and did are strings.
+    serializable.did = typeof serializable.did === 'string'
+      ? serializable.did
+      : (typeof serializable.sub === 'string' ? serializable.sub : String(serializable.did));
+    serializable.sub = typeof serializable.sub === 'string'
+      ? serializable.sub
+      : (typeof serializable.did === 'string' ? serializable.did : String(serializable.sub));
 
-    const agent = new Agent({ service: 'https://bsky.social', auth: hydrated });
-    const profile = await agent.getProfile({ actor: hydrated.sub || hydrated.did }).catch(() => null);
+    // 4. Store immediately.
+    console.log('[oauth/callback] tokenData to store:', serializable);
+    await sessionStore.set(serializable.sub, serializable);
+
+    // 5. You may now use it, or better: let /post-thread re-hydrate when posting.
+    const agent = new Agent({ service: 'https://bsky.social', auth: serializable });
+    const profile = await agent.getProfile({ actor: serializable.sub || serializable.did }).catch(() => null);
 
     res.type('text/plain').send(
-      `✅ SUCCESS! OAuth complete for DID: ${hydrated.sub || hydrated.did}\n` +
+      `✅ SUCCESS! OAuth complete for DID: ${serializable.sub || serializable.did}\n` +
       (profile ? `Logged in as: ${profile.data.handle}\n` : '') +
       `You can now close this window. The bot is authorized.`
     );
