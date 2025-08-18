@@ -178,6 +178,17 @@ app.post('/post-thread', async (req, res, next) => {
     }
     const session = row.rows[0].session_json;
 
+    // --- Final DID string check here ---
+    if (typeof session.did !== 'string') {
+      // Try to fix, fallback to sub if needed
+      session.did = typeof session.sub === 'string'
+        ? session.sub
+        : (Array.isArray(session.did) ? session.did[0] : String(session.did));
+    }
+    if (typeof session.sub !== 'string') {
+      session.sub = session.did;
+    }
+
     const liveSession = await client.restore(session);
     const agent = new Agent({ service: 'https://bsky.social', auth: liveSession });
 
@@ -191,7 +202,7 @@ app.post('/post-thread', async (req, res, next) => {
     });
 
     return res.json({ ok: true });
-  } catch(err) {
+  } catch (err) {
     return next(err);
   }
 });
