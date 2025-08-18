@@ -121,11 +121,10 @@ app.get('/oauth/callback', async (req, res, next) => {
     const params = new URLSearchParams(req.url.split('?')[1] || '');
     const { session } = await client.callback(params);
 
-    // Store the serializable session by DID in Postgres (no .toJSON!)
-    await sessionStore.set(session.did, session);
+    // ✅ Store the serializable session object (plain object, not class instance!)
+    await sessionStore.set(session.did, session.toJSON());
 
-    // (Optional) Debug: check what was stored
-    console.log('[oauth/callback] tokenData to store:', session.did, session);
+    console.log('[oauth/callback] tokenData to store:', session.did, session.toJSON());
 
     res.type('text/plain').send(
       `✅ SUCCESS! OAuth complete for DID: ${session.did}\nYou can now close this window. The bot is authorized.`
@@ -147,16 +146,17 @@ app.post('/post-thread', async (req, res, next) => {
       return res.status(400).json({ error: 'missing firstText or secondText' });
     }
 
-    // Always fetch the latest DID (should be session.did from storage)
-    const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
+    // Fetch the serialized session object
+    const row = await pg.query(`SELECT session_json FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
     if (!row.rowCount) {
       return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
     }
-    const did = row.rows[0].sub;
+    const storedSession = row.rows[0].session_json;
 
     let liveSession;
     try {
-      liveSession = await client.restore(did);
+      // ✅ Restore from the plain serialized session object
+      liveSession = await client.restore(storedSession);
     } catch (e) {
       return res.status(401).json({
         error: 'OAuth session expired or deleted. Re-authorization required.',
