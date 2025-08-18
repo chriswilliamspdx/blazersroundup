@@ -118,36 +118,39 @@ app.get('/auth/start', async (req, res, next) => {
 
 app.get('/oauth/callback', async (req, res, next) => {
   try {
+    // Parse the query params from the callback
     const params = new URLSearchParams(req.url.split('?')[1] || '');
     console.log('OAUTH CALLBACK PARAMS:', params.toString());
 
-    // 1. Get the result and session.
+    // Perform the OAuth callback with Bluesky
     const result = await client.callback(params);
     console.log('OAUTH CALLBACK RAW RESULT:', result);
 
-    // 2. Get the serializable session object.
-    const serializable = (typeof result.session.toJSON === 'function')
+    // Defensive: Convert session to a plain object
+    let sessionObj = (typeof result.session.toJSON === 'function')
       ? result.session.toJSON()
       : { ...result.session };
 
-    // 3. Defensive: Ensure sub and did are strings.
-    serializable.did = typeof serializable.did === 'string'
-      ? serializable.did
-      : (typeof serializable.sub === 'string' ? serializable.sub : String(serializable.did));
-    serializable.sub = typeof serializable.sub === 'string'
-      ? serializable.sub
-      : (typeof serializable.did === 'string' ? serializable.did : String(serializable.sub));
+    // Defensive: Ensure both did and sub are present and strings
+    sessionObj.did = typeof sessionObj.did === 'string'
+      ? sessionObj.did
+      : (typeof sessionObj.sub === 'string' ? sessionObj.sub : String(sessionObj.did));
+    sessionObj.sub = typeof sessionObj.sub === 'string'
+      ? sessionObj.sub
+      : (typeof sessionObj.did === 'string' ? sessionObj.did : String(sessionObj.sub));
 
-    // 4. Store immediately.
-    console.log('[oauth/callback] tokenData to store:', serializable);
-    await sessionStore.set(serializable.sub, serializable);
+    // Log exactly what will be stored
+    console.log('[oauth/callback] tokenData to store:', sessionObj);
 
-    // 5. You may now use it, or better: let /post-thread re-hydrate when posting.
-    const agent = new Agent({ service: 'https://bsky.social', auth: serializable });
-    const profile = await agent.getProfile({ actor: serializable.sub || serializable.did }).catch(() => null);
+    // Store in your session DB
+    await sessionStore.set(sessionObj.sub, sessionObj);
+
+    // Try to fetch the user profile as an immediate smoke test
+    const agent = new Agent({ service: 'https://bsky.social', auth: sessionObj });
+    const profile = await agent.getProfile({ actor: sessionObj.sub || sessionObj.did }).catch(() => null);
 
     res.type('text/plain').send(
-      `✅ SUCCESS! OAuth complete for DID: ${serializable.sub || serializable.did}\n` +
+      `✅ SUCCESS! OAuth complete for DID: ${sessionObj.sub || sessionObj.did}\n` +
       (profile ? `Logged in as: ${profile.data.handle}\n` : '') +
       `You can now close this window. The bot is authorized.`
     );
@@ -168,20 +171,23 @@ app.post('/post-thread', async (req, res, next) => {
       return res.status(400).json({ error: 'missing firstText or secondText' });
     }
 
-    // Fetch latest session row (get session_json!)
+    // Fetch latest session row
     const row = await pg.query(`SELECT session_json FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
     if (!row.rowCount) {
       return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
     }
-    const session = row.rows[0].session_json;
+    let session = row.rows[0].session_json;
 
-    // --- Add detailed logging here ---
-    console.log('[post-thread] Loaded session from DB:', session);
-    console.log('[post-thread] session.did:', session?.did);
-    console.log('[post-thread] session.sub:', session?.sub);
-    console.log('[post-thread] session.expires_at:', session?.expires_at);
-    console.log('[post-thread] session.access_token:', session?.access_token ? 'present' : 'missing');
-    console.log('[post-thread] session.refresh_token:', session?.refresh_token ? 'present' : 'missing');
+    // Defensive: ensure both did and sub are present and strings
+    session.did = typeof session.did === 'string'
+      ? session.did
+      : (typeof session.sub === 'string' ? session.sub : String(session.did));
+    session.sub = typeof session.sub === 'string'
+      ? session.sub
+      : (typeof session.did === 'string' ? session.did : String(session.sub));
+
+    // Logging: see what you’re restoring
+    console.log('[post-thread] Using session:', session);
 
     let liveSession;
     try {
