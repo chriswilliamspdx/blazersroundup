@@ -171,24 +171,31 @@ app.post('/post-thread', async (req, res, next) => {
       return res.status(400).json({ error: 'missing firstText or secondText' });
     }
 
-    // Get the whole session object
+    // Get the session object
     const row = await pg.query(`SELECT session_json FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
     if (!row.rowCount) {
       return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
     }
     const session = row.rows[0].session_json;
 
-    // --- Final DID string check here ---
+    // --- Normalize DID and sub as strings ---
     if (typeof session.did !== 'string') {
-      // Try to fix, fallback to sub if needed
-      session.did = typeof session.sub === 'string'
-        ? session.sub
-        : (Array.isArray(session.did) ? session.did[0] : String(session.did));
+      if (typeof session.sub === 'string') {
+        session.did = session.sub;
+      } else if (Array.isArray(session.did) && session.did.length > 0) {
+        session.did = session.did[0];
+      } else {
+        return res.status(400).json({ error: 'Session DID is missing or not a string' });
+      }
     }
     if (typeof session.sub !== 'string') {
       session.sub = session.did;
     }
 
+    // Defensive: log for debugging
+    console.log('[post-thread] session.did:', session.did, '| session.sub:', session.sub);
+
+    // Restore session and post
     const liveSession = await client.restore(session);
     const agent = new Agent({ service: 'https://bsky.social', auth: liveSession });
 
@@ -203,6 +210,7 @@ app.post('/post-thread', async (req, res, next) => {
 
     return res.json({ ok: true });
   } catch (err) {
+    console.error('[post-thread] error:', err);
     return next(err);
   }
 });
