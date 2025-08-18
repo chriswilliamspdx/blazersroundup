@@ -178,6 +178,12 @@ app.post('/post-thread', async (req, res, next) => {
     }
     const sub = row.rows[0].sub;
 
+    console.log('[post-thread] Loaded session from DB:', session);
+    console.log('[post-thread] sub:', sub);
+    console.log('[post-thread] session.expires_at:', session?.expires_at);
+    console.log('[post-thread] session.access_token:', session?.access_token ? 'present' : 'missing');
+    console.log('[post-thread] session.refresh_token:', session?.refresh_token ? 'present' : 'missing');
+
     let liveSession;
     try {
       liveSession = await client.restore(sub);
