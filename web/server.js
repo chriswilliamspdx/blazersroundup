@@ -121,11 +121,11 @@ app.get('/oauth/callback', async (req, res, next) => {
     const params = new URLSearchParams(req.url.split('?')[1] || '');
     const { session } = await client.callback(params);
 
-    // Store the serializable session by DID in Postgres
-    await sessionStore.set(session.did, session.toJSON());
+    // Store the serializable session by DID in Postgres (no .toJSON!)
+    await sessionStore.set(session.did, session);
 
     // (Optional) Debug: check what was stored
-    console.log('[oauth/callback] tokenData to store:', session.did, session.toJSON());
+    console.log('[oauth/callback] tokenData to store:', session.did, session);
 
     res.type('text/plain').send(
       `✅ SUCCESS! OAuth complete for DID: ${session.did}\nYou can now close this window. The bot is authorized.`
