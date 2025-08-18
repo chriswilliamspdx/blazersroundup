@@ -118,30 +118,46 @@ app.get('/auth/start', async (req, res, next) => {
 
 app.get('/oauth/callback', async (req, res, next) => {
   try {
+    // 1. Parse the query params from the callback
     const params = new URLSearchParams(req.url.split('?')[1] || '');
     console.log('OAUTH CALLBACK PARAMS:', params.toString());
 
+    // 2. Perform the OAuth callback with Bluesky
     const result = await client.callback(params);
     console.log('OAUTH CALLBACK RAW RESULT:', result);
 
-    // Use ONLY .toJSON() for storing
-    let sessionObj = (typeof result.session.toJSON === 'function')
+    // 3. Get ONLY the safe, serializable data (strip out methods, nested objects)
+    const raw = (typeof result.session.toJSON === 'function')
       ? result.session.toJSON()
       : { ...result.session };
 
-    // Defensive: Ensure both did and sub are present and strings
-    sessionObj.did = typeof sessionObj.did === 'string'
-      ? sessionObj.did
-      : (typeof sessionObj.sub === 'string' ? sessionObj.sub : String(sessionObj.did));
-    sessionObj.sub = typeof sessionObj.sub === 'string'
-      ? sessionObj.sub
-      : (typeof sessionObj.did === 'string' ? sessionObj.did : String(sessionObj.sub));
+    // 4. Pick only minimal fields needed for restoring
+    const sessionObj = {
+      did: typeof raw.did === 'string'
+        ? raw.did
+        : (typeof raw.sub === 'string' ? raw.sub : String(raw.did)),
+      sub: typeof raw.sub === 'string'
+        ? raw.sub
+        : (typeof raw.did === 'string' ? raw.did : String(raw.sub)),
+      handle: raw.handle,
+      access_token: raw.access_token,
+      refresh_token: raw.refresh_token,
+      expires_at: raw.expires_at,
+      // Optionally: add `scope`, `token_type`, or others if present/needed
+    };
 
-    // Store ONLY plain object!
+    // Defensive: ensure both did and sub are strings
+    if (!sessionObj.did || !sessionObj.sub) {
+      return res.status(401).type('text/plain').send(
+        '❌ OAuth callback failed: Missing session sub/did. Please re-authorize.'
+      );
+    }
+
+    // 5. Log and store minimal object
     console.log('[oauth/callback] tokenData to store:', sessionObj);
     await sessionStore.set(sessionObj.sub, sessionObj);
 
-    // Immediate check: try to use for Agent (optional smoke test)
+    // 6. Test: Try to use for Agent (immediate smoke test)
     const agent = new Agent({ service: 'https://bsky.social', auth: sessionObj });
     const profile = await agent.getProfile({ actor: sessionObj.sub || sessionObj.did }).catch(() => null);
 
