@@ -125,29 +125,15 @@ app.get('/oauth/callback', async (req, res, next) => {
     console.log('OAUTH CALLBACK RAW RESULT:', result);
 
     let hydrated = result.session;
-    try {
-      if (hydrated.sessionGetter && typeof hydrated.sessionGetter.getter === 'function') {
-        hydrated = await hydrated.sessionGetter.getter();
-        console.log('[oauth/callback] hydrated tokens:', hydrated);
-      }
-    } catch (err) {
-      console.error('[oauth/callback] token hydration/refresh failed:', err);
-      return res.status(401).type('text/plain').send(
-        '❌ OAuth session could not be hydrated (refresh failed or session was deleted by another process). Please re-authorize from the beginning.'
-      );
-    }
+if (hydrated.sessionGetter && typeof hydrated.sessionGetter.getter === 'function') {
+  hydrated = await hydrated.sessionGetter.getter();
+}
+const toStore = (typeof hydrated.toJSON === 'function')
+  ? hydrated.toJSON()
+  : hydrated;
 
-    // Defensive: Only proceed if session is usable
-    if (!hydrated || !hydrated.sub || typeof hydrated.sub !== 'string') {
-      return res.status(401).type('text/plain').send(
-        '❌ OAuth callback failed: No valid session/sub found after hydration. Please re-authorize.'
-      );
-    }
-
-    hydrated.did = typeof hydrated.did === 'string' ? hydrated.did : hydrated.sub;
-    console.log('[oauth/callback] tokenData to store:', hydrated);
-
-    await sessionStore.set(hydrated.sub, hydrated);
+console.log('[oauth/callback] tokenData to store:', toStore);
+await sessionStore.set(toStore.sub, toStore);
 
     const agent = new Agent({ service: 'https://bsky.social', auth: hydrated });
     const profile = await agent.getProfile({ actor: hydrated.sub || hydrated.did }).catch(() => null);
