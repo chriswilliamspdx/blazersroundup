@@ -178,8 +178,23 @@ app.post('/post-thread', async (req, res, next) => {
     }
     const sub = row.rows[0].sub;
 
-    // Restore the session using the sub (DID) as a string
-    const liveSession = await client.restore(sub);
+    let liveSession;
+    try {
+      liveSession = await client.restore(sub);
+    } catch (e) {
+      // Session deleted (likely due to refresh/expiration)
+      return res.status(401).json({
+        error: 'OAuth session expired or deleted. Re-authorization required.',
+        message: e.message || e,
+      });
+    }
+
+    if (!liveSession) {
+      return res.status(401).json({
+        error: 'OAuth session restore failed. Re-authorization required.',
+      });
+    }
+
     const agent = new Agent({ service: 'https://bsky.social', auth: liveSession });
 
     const firstPost = await agent.post({ text: firstText });
