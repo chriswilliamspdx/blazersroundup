@@ -124,28 +124,33 @@ app.get('/oauth/callback', async (req, res, next) => {
     const result = await client.callback(params);
     console.log('OAUTH CALLBACK RAW RESULT:', result);
 
-    // Always convert to plain object before mutating!
-    const session = result.session;
-    let tokenData = (typeof session.toJSON === 'function') ? session.toJSON() : { ...session };
+    // Hydrate tokens: the getter returns the actual session with tokens!
+    let hydrated = result.session;
+    if (hydrated.sessionGetter && typeof hydrated.sessionGetter.getter === 'function') {
+      hydrated = await hydrated.sessionGetter.getter();
+      console.log('[oauth/callback] hydrated tokens:', hydrated);
+    }
 
-    // Now it's safe to assign/normalize fields
-    tokenData.did = typeof tokenData.did === 'string'
-      ? tokenData.did
-      : (typeof tokenData.sub === 'string' ? tokenData.sub : String(tokenData.did));
-    tokenData.sub = typeof tokenData.sub === 'string'
-      ? tokenData.sub
-      : (typeof tokenData.did === 'string' ? tokenData.did : String(tokenData.sub));
+    // Defensive normalization
+    hydrated.did = typeof hydrated.did === 'string'
+      ? hydrated.did
+      : (typeof hydrated.sub === 'string' ? hydrated.sub : String(hydrated.did));
+    hydrated.sub = typeof hydrated.sub === 'string'
+      ? hydrated.sub
+      : (typeof hydrated.did === 'string' ? hydrated.did : String(hydrated.sub));
 
-    // Logging just before storing in DB
-    console.log('[oauth/callback] tokenData to store:', tokenData);
+    // Logging: see what you’re storing
+    console.log('[oauth/callback] tokenData to store:', hydrated);
 
-    await sessionStore.set(tokenData.sub, tokenData);
+    await sessionStore.set(hydrated.sub, hydrated);
 
-    const agent = new Agent({ service: 'https://bsky.social', ...tokenData });
-    const profile = await agent.getProfile({ actor: tokenData.sub || tokenData.did }).catch(() => null);
+    // For debugging: check what gets stored
+    // Now create agent with the hydrated session:
+    const agent = new Agent({ service: 'https://bsky.social', auth: hydrated });
+    const profile = await agent.getProfile({ actor: hydrated.sub || hydrated.did }).catch(() => null);
 
     res.type('text/plain').send(
-      `✅ SUCCESS! OAuth complete for DID: ${tokenData.sub || tokenData.did}\n` +
+      `✅ SUCCESS! OAuth complete for DID: ${hydrated.sub || hydrated.did}\n` +
       (profile ? `Logged in as: ${profile.data.handle}\n` : '') +
       `You can now close this window. The bot is authorized.`
     );
