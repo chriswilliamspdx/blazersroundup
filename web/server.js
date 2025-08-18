@@ -171,24 +171,25 @@ app.post('/post-thread', async (req, res, next) => {
       return res.status(400).json({ error: 'missing firstText or secondText' });
     }
 
-    // Fetch latest session row
-    const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
+    // Fetch latest session row (get session_json!)
+    const row = await pg.query(`SELECT session_json FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
     if (!row.rowCount) {
       return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
     }
-    const sub = row.rows[0].sub;
+    const session = row.rows[0].session_json;
 
+    // --- Add detailed logging here ---
     console.log('[post-thread] Loaded session from DB:', session);
-    console.log('[post-thread] sub:', sub);
+    console.log('[post-thread] session.did:', session?.did);
+    console.log('[post-thread] session.sub:', session?.sub);
     console.log('[post-thread] session.expires_at:', session?.expires_at);
     console.log('[post-thread] session.access_token:', session?.access_token ? 'present' : 'missing');
     console.log('[post-thread] session.refresh_token:', session?.refresh_token ? 'present' : 'missing');
 
     let liveSession;
     try {
-      liveSession = await client.restore(sub);
+      liveSession = await client.restore(session);
     } catch (e) {
-      // Session deleted (likely due to refresh/expiration)
       return res.status(401).json({
         error: 'OAuth session expired or deleted. Re-authorization required.',
         message: e.message || e,
