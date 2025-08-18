@@ -118,15 +118,13 @@ app.get('/auth/start', async (req, res, next) => {
 
 app.get('/oauth/callback', async (req, res, next) => {
   try {
-    // Parse the query params from the callback
     const params = new URLSearchParams(req.url.split('?')[1] || '');
     console.log('OAUTH CALLBACK PARAMS:', params.toString());
 
-    // Perform the OAuth callback with Bluesky
     const result = await client.callback(params);
     console.log('OAUTH CALLBACK RAW RESULT:', result);
 
-    // Defensive: Convert session to a plain object
+    // Use ONLY .toJSON() for storing
     let sessionObj = (typeof result.session.toJSON === 'function')
       ? result.session.toJSON()
       : { ...result.session };
@@ -139,13 +137,11 @@ app.get('/oauth/callback', async (req, res, next) => {
       ? sessionObj.sub
       : (typeof sessionObj.did === 'string' ? sessionObj.did : String(sessionObj.sub));
 
-    // Log exactly what will be stored
+    // Store ONLY plain object!
     console.log('[oauth/callback] tokenData to store:', sessionObj);
-
-    // Store in your session DB
     await sessionStore.set(sessionObj.sub, sessionObj);
 
-    // Try to fetch the user profile as an immediate smoke test
+    // Immediate check: try to use for Agent (optional smoke test)
     const agent = new Agent({ service: 'https://bsky.social', auth: sessionObj });
     const profile = await agent.getProfile({ actor: sessionObj.sub || sessionObj.did }).catch(() => null);
 
