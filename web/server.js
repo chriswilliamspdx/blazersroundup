@@ -124,27 +124,20 @@ app.get('/oauth/callback', async (req, res, next) => {
     const result = await client.callback(params);
     console.log('OAUTH CALLBACK RAW RESULT:', result);
 
-    // Hydrate tokens: the getter returns the actual session with tokens!
+    // --- INSERT THIS BLOCK RIGHT HERE ---
     let hydrated = result.session;
     if (hydrated.sessionGetter && typeof hydrated.sessionGetter.getter === 'function') {
       hydrated = await hydrated.sessionGetter.getter();
-      console.log('[oauth/callback] hydrated tokens:', hydrated);
     }
-
-    // Defensive normalization
     hydrated.did = typeof hydrated.did === 'string'
       ? hydrated.did
       : (typeof hydrated.sub === 'string' ? hydrated.sub : String(hydrated.did));
     hydrated.sub = typeof hydrated.sub === 'string'
       ? hydrated.sub
       : (typeof hydrated.did === 'string' ? hydrated.did : String(hydrated.sub));
-
-    // Logging: see what you’re storing
     console.log('[oauth/callback] tokenData to store:', hydrated);
-
     await sessionStore.set(hydrated.sub, hydrated);
 
-    // For debugging: check what gets stored
     // Now create agent with the hydrated session:
     const agent = new Agent({ service: 'https://bsky.social', auth: hydrated });
     const profile = await agent.getProfile({ actor: hydrated.sub || hydrated.did }).catch(() => null);
