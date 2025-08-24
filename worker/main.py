@@ -149,7 +149,7 @@ def fmt_mmss(seconds):
     return f"{int(m):02d}:{int(s):02d}"
 
 # --- Whisper ---
-log("Loading faster-whisper model:", WHISPER_MODEL)
+log("Loading faster-whisper model:", WHISPER_MODEL, "compute_type=int8")
 whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
 
 # --- Gemini ---
