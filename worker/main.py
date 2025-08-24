@@ -43,18 +43,34 @@ def db_exec(sql, args=None):
         return []
 
 def ensure_schema():
-    # Base tables (match sql/init.sql but safe if run here too)
+    # Base tables (safe to run repeatedly)
     db_exec("""
-    create table if not exists state (key text primary key, value text not null);
-    create table if not exists seen_episodes (
-      id bigserial primary key,
-      feed_url text not null,
-      rss_guid text,
-      spotify_episode_id text,
-      published_at timestamptz,
-      first_seen_at timestamptz default now(),
-      constraint uq_seen unique (feed_url, coalesce(rss_guid, ''), coalesce(spotify_episode_id, ''))
+    create table if not exists state (
+      key   text primary key,
+      value text not null
     );
+    """)
+
+    db_exec("""
+    create table if not exists seen_episodes (
+      id                 bigserial primary key,
+      feed_url           text not null,
+      rss_guid           text,
+      spotify_episode_id text,
+      published_at       timestamptz,
+      first_seen_at      timestamptz default now()
+    );
+    """)
+
+    # Expressions aren't allowed in a table-level UNIQUE constraint in Postgres.
+    # Enforce the same rule via a UNIQUE INDEX with expressions:
+    db_exec("""
+    create unique index if not exists uq_seen
+      on seen_episodes (
+        feed_url,
+        coalesce(rss_guid, ''),
+        coalesce(spotify_episode_id, '')
+      );
     """)
 ensure_schema()
 
@@ -74,8 +90,11 @@ def get_feed_baseline(feed_url: str):
     return None
 
 def set_feed_baseline(feed_url: str, dt_utc: datetime):
-    db_exec("insert into state(key,value) values($1,$2) on conflict (key) do update set value=excluded.value",
-            [_baseline_key(feed_url), dt_utc.astimezone(UTC).isoformat()])
+    db_exec(
+        "insert into state(key, value) values(%s, %s) "
+        "on conflict (key) do update set value = excluded.value",
+        [_baseline_key(feed_url), dt_utc.astimezone(UTC).isoformat()],
+    )
 
 # --- Spotify API ---
 _spotify_token = None
@@ -214,8 +233,11 @@ def already_seen(feed_url, guid, sp_id):
     return bool(rows)
 
 def mark_seen(feed_url, guid, sp_id, published_at):
-    db_exec("insert into seen_episodes(feed_url, rss_guid, spotify_episode_id, published_at) values($1,$2,$3,$4) on conflict do nothing",
-            [feed_url, guid, sp_id, published_at])
+    db_exec(
+        "insert into seen_episodes(feed_url, rss_guid, spotify_episode_id, published_at) "
+        "values(%s, %s, %s, %s) on conflict do nothing",
+        [feed_url, guid, sp_id, published_at],
+    )
 
 def parse_pubdate(entry):
     # prefer explicit fields; fallback to now if missing
