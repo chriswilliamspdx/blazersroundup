@@ -73,22 +73,36 @@ const pgLock = {
 
 // ------------------------------
 // OAuth Client Setup
-// ------------------------------
 const keyJwk = JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK);
 const signingKey = await JoseKey.fromImportable(keyJwk, BSKY_OAUTH_KID);
 
+// If you fetch metadata from a URL, that's fine.
+// Optional but nice: serve client.clientMetadata and client.jwks at endpoints (shown later).
 const clientMetadataResponse = await fetch(CLIENT_METADATA_URL);
 if (!clientMetadataResponse.ok) {
-  throw new Error(`Failed to fetch client metadata: ${clientMetadataResponse.statusText}`)
+  throw new Error(`Failed to fetch client metadata: ${clientMetadataResponse.statusText}`);
 }
 const clientMetadata = await clientMetadataResponse.json();
+
+// Runtime lock that matches the library's expected shape (requestLock)
+const requestLock = async (key, fn) => {
+  const c = await pg.connect();
+  try {
+    // One global namespace (1) + a hashed key for per-user lock
+    await c.query('SELECT pg_advisory_lock(1, hashtext($1))', [key]);
+    return await fn();
+  } finally {
+    try { await c.query('SELECT pg_advisory_unlock(1, hashtext($1))', [key]); } catch {}
+    c.release();
+  }
+};
 
 const client = new NodeOAuthClient({
   clientMetadata,
   keyset: [signingKey],
   stateStore,
   sessionStore,
-  lock: pgLock, 
+  requestLock, // <-- critical: correct option name & shape
 });
 
 const app = express();
@@ -119,16 +133,23 @@ app.get('/auth/start', async (req, res, next) => {
 app.get('/oauth/callback', async (req, res, next) => {
   try {
     const params = new URLSearchParams(req.url.split('?')[1] || '');
-    const { session } = await client.callback(params);
+    const { session /*, state*/ } = await client.callback(params);
 
-    // ✅ Store the serializable session object (plain object, not class instance!)
-    await sessionStore.set(session.did, session.toJSON());
+    // Store the session exactly as returned by the library (no .toJSON())
+    await sessionStore.set(session.did, session);
+    console.log('[oauth/callback] stored session for', session.did);
 
-    console.log('[oauth/callback] tokenData to store:', session.did, session.toJSON());
+    // Optional smoke test; the README shows Agent(session)
+    const agent = new Agent(session);
+    const profile = await agent.getProfile({ actor: agent.did }).catch(() => null);
 
-    res.type('text/plain').send(
-      `✅ SUCCESS! OAuth complete for DID: ${session.did}\nYou can now close this window. The bot is authorized.`
-    );
+    res
+      .type('text/plain')
+      .send(
+        `✅ SUCCESS! OAuth complete for DID: ${session.did}\n` +
+        (profile ? `Logged in as: ${profile.data.handle}\n` : '') +
+        `You can now close this window. The bot is authorized.`
+      );
   } catch (err) {
     return next(err);
   }
@@ -137,47 +158,25 @@ app.get('/oauth/callback', async (req, res, next) => {
 app.post('/post-thread', async (req, res, next) => {
   try {
     const token = req.get('X-Internal-Token') || '';
-    if (token !== INTERNAL_API_TOKEN) {
-      return res.status(403).json({ error: 'forbidden' });
-    }
+    if (token !== INTERNAL_API_TOKEN) return res.status(403).json({ error: 'forbidden' });
 
     const { firstText, secondText } = req.body;
-    if (!firstText || !secondText) {
-      return res.status(400).json({ error: 'missing firstText or secondText' });
-    }
+    if (!firstText || !secondText) return res.status(400).json({ error: 'missing firstText or secondText' });
 
-    // Fetch the serialized session object
-    const row = await pg.query(`SELECT session_json FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
-    if (!row.rowCount) {
-      return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
-    }
-    const storedSession = row.rows[0].session_json;
+    // Read the most recent DID (“sub”) we stored
+    const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
+    if (!row.rowCount) return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
+    const did = row.rows[0].sub;
 
-    let liveSession;
-    try {
-      // ✅ Restore from the plain serialized session object
-      liveSession = await client.restore(storedSession);
-    } catch (e) {
-      return res.status(401).json({
-        error: 'OAuth session expired or deleted. Re-authorization required.',
-        message: e.message || e,
-      });
-    }
+    // Per docs, restore by DID string. If tokens need refresh, the client handles it
+    const oauthSession = await client.restore(did); // may refresh & persist via sessionStore
+    if (!oauthSession) return res.status(401).json({ error: 'OAuth session restore failed. Re-authorization required.' });
 
-    if (!liveSession) {
-      return res.status(401).json({
-        error: 'OAuth session restore failed. Re-authorization required.',
-      });
-    }
-
-    // Fix: supply { service, auth }
-    const agent = new Agent({ service: 'https://bsky.social', auth: liveSession });
+    // Per docs, pass the session directly to Agent()
+    const agent = new Agent(oauthSession);
 
     const firstPost = await agent.post({ text: firstText });
-    await agent.post({
-      text: secondText,
-      reply: { root: firstPost, parent: firstPost }
-    });
+    await agent.post({ text: secondText, reply: { root: firstPost, parent: firstPost } });
 
     return res.json({ ok: true });
   } catch (err) {
