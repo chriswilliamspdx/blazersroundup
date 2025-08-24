@@ -146,22 +146,17 @@ app.post('/post-thread', async (req, res, next) => {
       return res.status(400).json({ error: 'missing firstText or secondText' });
     }
 
-    // Fetch the serialized session object, including its subject identifier
-    const row = await pg.query(
-      `SELECT sub, session_json FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`
-    );
+    // Fetch the serialized session object
+    const row = await pg.query(`SELECT session_json FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
     if (!row.rowCount) {
-      return res
-        .status(401)
-        .json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
+      return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
     }
-    const stored = row.rows[0];
+    const storedSession = row.rows[0].session_json;
 
     let liveSession;
     try {
-      // Restore session by re-attaching the sub to the stored JSON
-      liveSession = await client.restore({ ...stored.session_json, sub: stored.sub });
-      // Alternatively, call: liveSession = await client.restore(stored.sub);
+      // ✅ Restore from the plain serialized session object
+      liveSession = await client.restore(storedSession);
     } catch (e) {
       return res.status(401).json({
         error: 'OAuth session expired or deleted. Re-authorization required.',
