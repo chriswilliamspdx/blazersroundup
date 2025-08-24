@@ -8,6 +8,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from google import genai
 from google.genai import types as gtypes
+import subprocess
 
 DB_URL = os.environ["DATABASE_URL"]
 WEB_BASE_URL = os.environ["WEB_BASE_URL"]
@@ -196,14 +197,31 @@ def clamp(text, limit=POST_CHAR_LIMIT):
     return text[:limit-1] + "…"
 
 def download_audio(enclosure_url):
-    r = requests.get(enclosure_url, timeout=120, stream=True)
-    r.raise_for_status()
-    content = r.content
-    audio = AudioSegment.from_file(io.BytesIO(content))
-    audio = audio.set_channels(1).set_frame_rate(16000)
-    buf = io.BytesIO()
-    audio.export(buf, format="wav")
-    return buf.getvalue()
+    """
+    Use ffmpeg to read the remote audio URL and transcode to 16kHz mono WAV.
+    Returns raw WAV bytes for Whisper. This avoids pydub/BytesIO issues.
+    """
+    cmd = [
+        "ffmpeg",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", enclosure_url,        # read directly from the URL
+        "-ac", "1",                 # mono
+        "-ar", "16000",             # 16 kHz
+        "-f", "wav",
+        "pipe:1",                   # write WAV to stdout
+    ]
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=300,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        log("ffmpeg error for enclosure:", enclosure_url, proc.stderr.decode("utf-8", "ignore"))
+        raise RuntimeError("ffmpeg failed to decode enclosure")
+    return proc.stdout
 
 def transcribe(bytes_wav):
     segments, _ = whisper.transcribe(bytes_wav, vad_filter=True, vad_parameters={"min_silence_duration_ms": 500})
