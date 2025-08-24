@@ -8,6 +8,7 @@
   "scope": "atproto",
   "redirect_uris": ["https://blazersroundup-production.up.railway.app/oauth/callback"],
   "dpop_bound_access_tokens": true,
+  "scope": "atproto transition:generic",
   "token_endpoint_auth_method": "private_key_jwt",
   "token_endpoint_auth_signing_alg": "ES256",
   "jwks_uri": "https://chriswilliamspdx.github.io/blazersroundup/jwks.json?v=100",
