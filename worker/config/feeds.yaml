@@ -1,0 +1,106 @@
+timezone: America/Los_Angeles
+poll_interval_seconds: 600
+post_char_limit: 300
+
+keywords_positive:
+  - deni avdija
+  - blake wesley
+  - sidy cissoko
+  - damian lillard
+  - caleb love
+  - yang hansen
+  - donovan clingan
+  - jrue holiday
+  - duop reath
+  - robert williams
+  - jerami grant
+  - matisse thybulle
+  - toumani camara
+  - rayan rupert
+  - kris murray
+  - scoot henderson
+  - shaedon sharpe
+  - portland trail blazers
+  - portland
+  - trail blazers
+  - blazers
+  - rip city
+  - jody allen
+  - joe cronin
+  - mike schmitz
+  - rip city remix
+  - tom dundon
+
+exclude_note: "All detections must be in the NBA Portland Trail Blazers context (no generic 'trailblazer' meanings)."
+
+national_feeds:
+  - rss: https://feeds.megaphone.fm/zach-lowe
+    spotify_show: https://open.spotify.com/show/7odspoIkzPJSTsiwffW20f?si=8c59ab29f05e4a3d
+  - rss: https://feeds.megaphone.fm/ESP4033296397
+    spotify_show: https://open.spotify.com/show/4mOLvZqMud0JromeBgLpIh?si=f12c88d2e1f84f93
+  - rss: https://feeds.megaphone.fm/the-ringer-nba-show
+    spotify_show: https://open.spotify.com/show/5jUeKBONOmKJivqrRoIDJn?si=5c50b0aee6004b00
+  - rss: https://feeds.acast.com/public/shows/6818c192eb737caf8cadd833
+    spotify_show: https://open.spotify.com/show/7hVMyKCBLJ6uqIKcvKuz88?si=19f3286bbded4a85
+  - rss: https://feeds.acast.com/public/shows/68188c4aeb146d8e35bc5ca3
+    spotify_show: https://open.spotify.com/show/08YpVBgkwNP5NotVbYJoGm?si=6e93bf5d5bac42dd
+  - rss: https://feeds.megaphone.fm/ESP4224222588
+    spotify_show: https://open.spotify.com/show/6EpeMXpZxRVrLdWEVdYdj3?si=e4df8ab3a8a94b00
+  - rss: https://feeds.simplecast.com/JGGpY1xu
+    spotify_show: https://open.spotify.com/show/7rPj9HV9s5gwPnyPIruxKU?si=de5f00e8a1cb48e3
+  - rss: https://feeds.simplecast.com/XThpxTzR
+    spotify_show: https://open.spotify.com/show/4WnLuqG3N40aauvFxKSABb?si=a5b998560ef847ce
+  - rss: https://feeds.simplecast.com/58vfNLpd
+    spotify_show: https://open.spotify.com/show/5IQEIZpEp32XFef8MyQaq7?si=e62b95dc62934f6b
+  - rss: https://feeds.simplecast.com/A9Qn_Eje
+    spotify_show: https://open.spotify.com/show/5vRJgUKqNVvwRE3OuduewS?si=ac8124e1634a43ef
+  - rss: https://www.spreaker.com/show/2916956/episodes/feed
+    spotify_show: https://open.spotify.com/show/3Xnq1yKgX8uJCllz1fOQfP?si=ba98997320f4438f
+  - rss: https://feeds.megaphone.fm/the-bill-simmons-podcast
+    spotify_show: https://open.spotify.com/show/07SjDmKb9iliEzpNcN2xGD?si=ac714686a7f64199
+  - rss: https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/3bb6ed46-a795-4116-b7ef-ae3900375e77/fd0a584d-3ada-4c93-bbe1-ae3900375e85/podcast.rss
+    spotify_show: https://open.spotify.com/show/3Cdge5G5apw1LsC8jGcl4j?si=c82c9ecced524071
+  - rss: https://anchor.fm/s/485def10/podcast/rss
+    spotify_show: https://open.spotify.com/show/7hMLtatNwpDxN3mg0qZUV4?si=866353f950af4086
+  - rss: https://feeds.simplecast.com/wiOjZJf6
+    spotify_show: https://open.spotify.com/show/7eZjcZwf6niRLweSzBCKHK?si=30bc38bfcf0f4da0
+  - rss: https://anchor.fm/s/86b2b318/podcast/rss
+    spotify_show: https://open.spotify.com/show/12kpkAvUj6LGxzViDIH0qH?si=eec03485f9b047a5
+  - rss: https://feeds.megaphone.fm/basketballilluminati
+    spotify_show: https://open.spotify.com/show/6rZnRL3IFXCu5ps0KJ9VF2?si=ad7e9ccc42f34ff1
+  - rss: https://feeds.simplecast.com/jpecpS5U
+    spotify_show: https://open.spotify.com/show/7jRkyMo5IeDJoJSijnrh3b?si=8c4920d871e6452a
+  - rss: https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/77a6df17-4a8a-4929-ac1b-b088010683dd/e3575515-668a-4eb8-8c52-b0880106843a/podcast.rss
+    spotify_show: https://open.spotify.com/show/7ez8SsDDKbf0q5vaH2ulJf?si=03828c0cf2624b9c
+  - rss: https://feeds.megaphone.fm/the-ryen-russillo-podcast
+    spotify_show: https://open.spotify.com/show/2XdegS23ImVZldex799DUS?si=652b2b98c5524a7d
+  - rss: https://feeds.megaphone.fm/NSM6725424107
+    spotify_show: https://open.spotify.com/show/0zey6blAoO3cLJOIalVapi?si=ae36c29f3de4457d
+  - rss: https://www.spreaker.com/show/3211931/episodes/feed
+    spotify_show: https://open.spotify.com/show/59kdFGU23xjFAoDYQvVBCa?si=c5065a866d424f26
+
+blazers_feeds:
+  - rss: http://feeds.megaphone.fm/lockedonblazers
+    spotify_show: https://open.spotify.com/show/5JX8iraZGkszb5tsPQNsMU?si=d97e9e690454481b
+  - rss: https://anchor.fm/s/146511c/podcast/rss
+    spotify_show: https://open.spotify.com/show/76m5P91NpUtK6ECKIcJYTv?si=39ae5b59cf6b4634
+  - rss: https://feeds.simplecast.com/XZ1wZfs_
+    spotify_show: https://open.spotify.com/show/3KQ8g9JYJCSvxng0WoIFoI?si=d5531921069c4c03
+  - rss: http://feeds.megaphone.fm/blazerfocused
+    spotify_show: https://open.spotify.com/show/5pdyucAjh3ppFRfQQ8oVm1?si=5719444ef57d430c
+  - rss: https://feeds.buzzsprout.com/2066763.rss
+    spotify_show: https://open.spotify.com/show/1lPDm7cCUgGNK3YQQU72s1?si=62fb1c64ec884df2
+  - rss: https://feeds.megaphone.fm/ROMN1012807481
+    spotify_show: https://open.spotify.com/show/1YEAGWhbfTKAJXFrquJVsr?si=2b959b676d2c4baf
+  - rss: https://bleav.com/feed/podcast/bleav-in-trailblazers
+    spotify_show: https://open.spotify.com/show/7koGHDPZSW4AkgZqG5Yeiz?si=aeee883be50f485f
+  - rss: https://feeds.acast.com/public/shows/65ac80def653f800165c13fc
+    spotify_show: https://open.spotify.com/show/4Nji1FSP94gaMQnJmHY2Mq?si=ba7ba5463cda46a0
+  - rss: https://sagedigital.libsyn.com/rss
+    spotify_show: https://open.spotify.com/show/7g7EbjAsWTuvaHmZHAQdRZ?si=5a6beea1ceda4b4b
+  - rss: https://feeds.buzzsprout.com/19710.rss
+    spotify_show: https://open.spotify.com/show/3LzH0aoi1hN7f4xRkpC3Oz?si=4cc0e43640154504
+  - rss: https://feeds.megaphone.fm/ROMN6537468398
+    spotify_show: https://open.spotify.com/show/7kmxjurXPWZI8usMvL4QNE?si=a81c40fb2e10455a
+  - rss: https://trailblazerdude.podomatic.com/rss2.xml
+    spotify_show: https://open.spotify.com/show/5uespcsjkK6D2GQVDj9B7e?si=ed0dff7a4c874a9b
