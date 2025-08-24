@@ -133,13 +133,13 @@ app.get('/auth/start', async (req, res, next) => {
 app.get('/oauth/callback', async (req, res, next) => {
   try {
     const params = new URLSearchParams(req.url.split('?')[1] || '');
-    const { session /*, state*/ } = await client.callback(params);
 
-    // Store the session exactly as returned by the library (no .toJSON())
-    await sessionStore.set(session.did, session);
-    console.log('[oauth/callback] stored session for', session.did);
+    // The oauth client will:
+    //  - validate the callback
+    //  - persist the session using your sessionStore (do NOT persist manually)
+    const { session } = await client.callback(params);
 
-    // Optional smoke test; the README shows Agent(session)
+    // Optional smoke test: Agent(session)
     const agent = new Agent(session);
     const profile = await agent.getProfile({ actor: agent.did }).catch(() => null);
 
