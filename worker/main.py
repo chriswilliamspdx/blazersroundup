@@ -17,7 +17,9 @@ SPOTIFY_CLIENT_SECRET = os.environ["SPOTIFY_CLIENT_SECRET"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "600"))
 TIMEZONE = os.getenv("TIMEZONE", "America/Los_Angeles")
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small-int8")
+RAW_WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
+# tolerate accidental suffixes like "-int8" or "-int8_float32"
+WHISPER_MODEL = re.sub(r"-(int8.*)$", "", RAW_WHISPER_MODEL.strip().lower())
 
 LA = tz.gettz(TIMEZONE)
 UTC = tz.UTC
