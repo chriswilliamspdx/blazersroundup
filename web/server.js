@@ -76,13 +76,14 @@ const pgLock = {
 const keyJwk = JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK);
 const signingKey = await JoseKey.fromImportable(keyJwk, BSKY_OAUTH_KID);
 
-// If you fetch metadata from a URL, that's fine.
-// Optional but nice: serve client.clientMetadata and client.jwks at endpoints (shown later).
 const clientMetadataResponse = await fetch(CLIENT_METADATA_URL);
 if (!clientMetadataResponse.ok) {
   throw new Error(`Failed to fetch client metadata: ${clientMetadataResponse.statusText}`);
 }
 const clientMetadata = await clientMetadataResponse.json();
+
+// ✅ Ensure required scopes are present (transitional scope covers posting)
+clientMetadata.scope = 'atproto transition:generic';
 
 // Runtime lock that matches the library's expected shape (requestLock)
 const requestLock = async (key, fn) => {
