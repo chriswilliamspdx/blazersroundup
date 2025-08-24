@@ -197,31 +197,32 @@ def clamp(text, limit=POST_CHAR_LIMIT):
     return text[:limit-1] + "…"
 
 def download_audio(enclosure_url):
-    """
-    Use ffmpeg to read the remote audio URL and transcode to 16kHz mono WAV.
-    Returns raw WAV bytes for Whisper. This avoids pydub/BytesIO issues.
-    """
-    cmd = [
-        "ffmpeg",
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", enclosure_url,        # read directly from the URL
-        "-ac", "1",                 # mono
-        "-ar", "16000",             # 16 kHz
-        "-f", "wav",
-        "pipe:1",                   # write WAV to stdout
-    ]
-    proc = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=300,
-    )
-    if proc.returncode != 0 or not proc.stdout:
-        log("ffmpeg error for enclosure:", enclosure_url, proc.stderr.decode("utf-8", "ignore"))
-        raise RuntimeError("ffmpeg failed to decode enclosure")
-    return proc.stdout
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; BlazersRoundup/1.0; +https://github.com/chriswilliamspdx/blazersroundup)"
+    }
+    r = requests.get(enclosure_url, timeout=120, stream=True, headers=headers)
+    r.raise_for_status()
+    content = r.content
+
+    # Guess format from Content-Type or URL
+    ctype = (r.headers.get("Content-Type") or "").lower()
+    url_l = enclosure_url.lower()
+    if "mpeg" in ctype or url_l.endswith(".mp3"):
+        fmt = "mp3"
+    elif "mp4" in ctype or "aac" in ctype or url_l.endswith(".m4a") or url_l.endswith(".mp4"):
+        fmt = "m4a"  # pydub/ffmpeg will handle AAC in MP4/M4A
+    elif "wav" in ctype or url_l.endswith(".wav"):
+        fmt = "wav"
+    else:
+        # Fallback: let ffmpeg sniff; most podcast enclosures are mp3
+        fmt = None
+
+    bio = io.BytesIO(content)
+    audio = AudioSegment.from_file(bio, format=fmt)  # explicit format when we know it
+    audio = audio.set_channels(1).set_frame_rate(16000)
+    buf = io.BytesIO()
+    audio.export(buf, format="wav")
+    return buf.getvalue()
 
 def transcribe(bytes_wav):
     segments, _ = whisper.transcribe(bytes_wav, vad_filter=True, vad_parameters={"min_silence_duration_ms": 500})
@@ -293,6 +294,7 @@ def handle_national(feed_url, show_id, entry):
     if not enc:
         mark_seen(feed_url, guid, None, pub); return
 
+    log("downloading audio", enc)
     audio = download_audio(enc)
     full_text, spans = transcribe(audio)
     seg = find_blazers_segments(spans)
@@ -331,6 +333,7 @@ def handle_blazers(feed_url, show_id, entry):
     if not enc:
         mark_seen(feed_url, guid, None, pub); return
 
+    log("downloading audio", enc)
     audio = download_audio(enc)
     full_text, spans = transcribe(audio)
 
@@ -367,10 +370,21 @@ def enclosure_url(entry):
     return None
 
 # -------- Feed processing with per-feed baseline --------
+def fetch_feed(feed_url: str):
+    # Use a real UA; some hosts block default clients
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; BlazersRoundup/1.0; +https://github.com/chriswilliamspdx/blazersroundup)"
+    }
+    r = requests.get(feed_url, headers=headers, timeout=30)
+    r.raise_for_status()
+    # Pass bytes to feedparser so we bypass any network shenanigans in feedparser
+    return feedparser.parse(r.content)
+
 def process_feed(feed_url, show_url, mode):
     try:
         show_id = parse_spotify_show_id(show_url)
-        d = feedparser.parse(feed_url)
+        d = fetch_feed(feed_url)
+        log("feed fetched ok", feed_url, "entries:", len(getattr(d, "entries", [])))
         entries = list(d.entries)
         if not entries:
             return
