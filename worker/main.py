@@ -161,7 +161,11 @@ except ValueError as e:
     raise
 
 # --- Gemini ---
-ai = genai.Client()  # uses GEMINI_API_KEY from env
+# --- Gemini ---
+_gemini_key = os.environ.get("GEMINI_API_KEY")
+if not _gemini_key:
+    raise RuntimeError("GEMINI_API_KEY is not set")
+ai = genai.Client(api_key=_gemini_key)
 
 def gemini_json(prompt, text):
     resp = ai.models.generate_content(
