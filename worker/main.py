@@ -19,7 +19,7 @@ POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "600"))
 TIMEZONE = os.getenv("TIMEZONE", "America/Los_Angeles")
 RAW_WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
 # tolerate accidental suffixes like "-int8" or "-int8_float32"
-WHISPER_MODEL = re.sub(r"-(int8.*)$", "", RAW_WHISPER_MODEL.strip().lower())
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
 
 LA = tz.gettz(TIMEZONE)
 UTC = tz.UTC
@@ -149,8 +149,16 @@ def fmt_mmss(seconds):
     return f"{int(m):02d}:{int(s):02d}"
 
 # --- Whisper ---
-log("Loading faster-whisper model:", WHISPER_MODEL, "compute_type=int8")
-whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+# --- Whisper ---
+log("Loading faster-whisper model:", WHISPER_MODEL)
+# normalize accidental "-int8" suffix in env (int8 is a compute_type, not a model id)
+_model_name = WHISPER_MODEL.replace("-int8", "")
+try:
+    whisper = WhisperModel(_model_name, device="cpu", compute_type="int8")
+except ValueError as e:
+    log("Whisper model init failed:", e,
+        "Set WHISPER_MODEL to one of: tiny, base, small, medium, large-v2, distil-*, etc.")
+    raise
 
 # --- Gemini ---
 ai = genai.Client()  # uses GEMINI_API_KEY from env
