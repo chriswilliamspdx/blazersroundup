@@ -5,6 +5,20 @@ from dateutil import parser as dtparse, tz
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import youtube_transcript_api as yta
+# YouTube transcripts
+try:
+    from youtube_transcript_api import (
+        YouTubeTranscriptApi,
+        NoTranscriptFound,
+        TranscriptsDisabled,
+        CouldNotRetrieveTranscript,
+    )
+except ModuleNotFoundError as e:
+    # Make the error obvious at startup instead of a NameError later
+    raise RuntimeError(
+        "Missing dependency 'youtube-transcript-api'. "
+        "Add it to worker/requirements.txt and redeploy."
+    ) from e
 from youtube_transcript_api import (
     YouTubeTranscriptApi as YT,
     NoTranscriptFound,
