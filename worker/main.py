@@ -1,10 +1,15 @@
-import os, time, io, re, json, math, hashlib
+import os, time, re, json, math, hashlib
 import feedparser, requests, yaml
 from datetime import datetime
 from dateutil import parser as dtparse, tz
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled, CouldNotRetrieveTranscript
+from youtube_transcript_api import (
+    YouTubeTranscriptApi,
+    NoTranscriptFound,
+    TranscriptsDisabled,
+    CouldNotRetrieveTranscript,
+)
 from google import genai
 from google.genai import types as gtypes
 
@@ -13,23 +18,52 @@ DB_URL = os.environ["DATABASE_URL"]
 WEB_BASE_URL = os.environ["WEB_BASE_URL"].rstrip("/")
 INTERNAL_API_TOKEN = os.environ["INTERNAL_API_TOKEN"]
 
-# Optional: where to read config (default to the YouTube-only config you generated)
-FEEDS_PATH = os.getenv("FEEDS_PATH", "/app/config/feeds.youtube.yaml")
+# Optional: where to read config (defaults to YouTube-only if present; else falls back to feeds.yaml)
+DEFAULT_FEEDS_PATHS = [
+    os.getenv("FEEDS_PATH", "/app/config/feeds.youtube.yaml"),
+    "/app/config/feeds.yaml",
+]
 
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "600"))
 TIMEZONE = os.getenv("TIMEZONE", "America/Los_Angeles")
+DEBUG = os.getenv("DEBUG", "0") == "1"
+FORCE_ONE_SHOT = os.getenv("FORCE_ONE_SHOT", "0") == "1"  # process newest item once
+
 LA = tz.gettz(TIMEZONE)
 UTC = tz.UTC
 
-with open(FEEDS_PATH, "r", encoding="utf-8") as f:
-    CONFIG = yaml.safe_load(f)
+def dlog(*args):
+    if DEBUG:
+        print("[debug]", *args, flush=True)
+
+def log(*args):
+    print("[worker]", *args, flush=True)
+
+def _load_config():
+    last_err = None
+    for path in DEFAULT_FEEDS_PATHS:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+                dlog("loaded config from", path)
+                return cfg
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"Unable to load feeds config from {DEFAULT_FEEDS_PATHS}: {last_err}")
+
+CONFIG = _load_config()
 
 POST_CHAR_LIMIT = int(CONFIG.get("post_char_limit", 300))
 KEYWORDS = [k.lower() for k in CONFIG.get("keywords_positive", [])]
 EXCLUDE_NOTE = CONFIG.get("exclude_note", "")
 
-def log(*args):
-    print("[worker]", *args, flush=True)
+dlog("config keys:", list(CONFIG.keys()))
+dlog(
+    "counts:",
+    "national_feeds=", len(CONFIG.get("national_feeds", [])),
+    "blazers_feeds=", len(CONFIG.get("blazers_feeds", [])),
+)
 
 # ---------------- DB helpers ----------------
 conn = psycopg2.connect(DB_URL)
@@ -51,8 +85,7 @@ def ensure_schema():
     );
     """)
 
-    # seen episodes: keep existing columns to avoid migrations.
-    # We'll store YouTube video IDs in spotify_episode_id column (name only; value is a YT ID).
+    # seen episodes: reuse existing columns; we'll store YouTube video IDs in spotify_episode_id column
     db_exec("""
     create table if not exists seen_episodes (
       id                 bigserial primary key,
@@ -64,7 +97,7 @@ def ensure_schema():
     );
     """)
 
-    # Unique index (expression-based) to enforce dedupe by (feed_url, rss_guid, media_id)
+    # Dedupe via UNIQUE INDEX with expressions
     db_exec("""
     create unique index if not exists uq_seen
       on seen_episodes (
@@ -100,20 +133,17 @@ def set_feed_baseline(feed_url: str, dt_utc: datetime):
 def yt_channel_feed_url(channel_id: str) -> str:
     return f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
 
-def parse_youtube_video_id(entry) -> str:
+def parse_youtube_video_id(entry) -> str | None:
     """
-    Try multiple places to robustly extract a video ID from the YouTube channel RSS entry.
+    Try multiple places to robustly extract a video ID from a YouTube channel RSS entry.
     """
-    # 1) feedparser often exposes 'yt_videoid'
     vid = entry.get("yt_videoid")
     if vid:
         return vid
-    # 2) entry.id like 'yt:video:VIDEOID'
     eid = entry.get("id") or ""
     m = re.search(r'[:/](?P<vid>[A-Za-z0-9_-]{6,})$', eid)
     if m:
         return m.group("vid")
-    # 3) entry.link like 'https://www.youtube.com/watch?v=VIDEOID'
     link = entry.get("link") or ""
     m = re.search(r'[?&]v=([A-Za-z0-9_-]{6,})', link)
     if m:
@@ -125,12 +155,10 @@ def get_transcript_text(video_id: str) -> tuple[str, list]:
     Return (full_text, segments) where segments = [(start, dur, text), ...]
     Uses youtube-transcript-api (no API key). May fail if captions disabled.
     """
-    # Try English (manual) then English (auto)
     transcript = None
     try:
         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
     except NoTranscriptFound:
-        # as a fallback try auto-generated
         try:
             transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en-US", "en-GB"])
         except Exception:
@@ -138,8 +166,7 @@ def get_transcript_text(video_id: str) -> tuple[str, list]:
     except (TranscriptsDisabled, CouldNotRetrieveTranscript) as e:
         raise e
 
-    # transcript is list of dicts: {'text':..., 'start':..., 'duration':...}
-    segs = [(float(t.get("start", 0.0)), float(t.get("duration", 0.0)), t.get("text", "").strip()) for t in transcript]
+    segs = [(float(t.get("start", 0.0)), float(t.get("duration", 0.0)), (t.get("text") or "").strip()) for t in transcript]
     full_text = " ".join(s[2] for s in segs if s[2])
     return full_text, segs
 
@@ -153,7 +180,7 @@ def clamp(text, limit=POST_CHAR_LIMIT):
         return text
     return text[:limit-1] + "…"
 
-def first_keyword_hit(segs: list) -> tuple[int|None, str|None]:
+def first_keyword_hit(segs: list) -> tuple[int | None, str | None]:
     """
     Find first segment that contains any of the target keywords.
     Returns (start_seconds, matched_text) or (None, None).
@@ -195,8 +222,8 @@ def mark_seen(feed_url, guid, media_id, published_at):
     )
 
 # ---------------- Gemini ----------------
-# Per https://ai.google.dev/gemini-api/docs/quickstart (Python)
-ai = genai.Client()  # reads GEMINI_API_KEY from env
+# Per https://ai.google.dev/gemini-api/docs/quickstart
+ai = genai.Client()  # uses GEMINI_API_KEY from env
 
 def gemini_json(prompt, text):
     resp = ai.models.generate_content(
@@ -223,7 +250,7 @@ def gemini_json(prompt, text):
 
 # ---------------- Core processing ----------------
 def parse_pubdate(entry):
-    # YouTube RSS has 'published' like "2025-08-22T17:11:00+00:00"
+    # YouTube RSS typically has 'published' like "2025-08-22T17:11:00+00:00"
     if "published" in entry:
         try:
             dt = dtparse.parse(entry["published"])
@@ -232,6 +259,7 @@ def parse_pubdate(entry):
             return dt.astimezone(UTC)
         except Exception:
             pass
+    # Fallback: now
     return datetime.now(UTC)
 
 def process_channel(channel_id: str, mode: str):
@@ -239,8 +267,10 @@ def process_channel(channel_id: str, mode: str):
     try:
         d = feedparser.parse(feed_url)
         entries = list(d.entries)
+        dlog("feed:", feed_url, "entries:", len(entries))
+
         if not entries:
-            log("no entries for channel", channel_id)
+            dlog("feed has 0 entries:", feed_url)
             return
 
         # Build (pub, entry, vid)
@@ -248,19 +278,24 @@ def process_channel(channel_id: str, mode: str):
         for e in entries:
             vid = parse_youtube_video_id(e)
             if not vid:
+                dlog("skip entry: could not parse video id", e.get("id") or e.get("link"))
                 continue
             pub = parse_pubdate(e)
             rows.append((pub, e, vid))
 
         if not rows:
+            dlog("no rows after parsing video ids")
             return
 
         rows.sort(key=lambda t: t[0], reverse=True)
         newest_pub = rows[0][0]
         baseline = get_feed_baseline(feed_url)
+        dlog("baseline for", feed_url, "=", baseline.isoformat() if baseline else None)
+        dlog("newest_pub:", newest_pub.isoformat())
 
         # First run: process only most recent
         if baseline is None:
+            dlog("first run for feed; newest entry will be processed once")
             pub, entry, vid = rows[0]
             handle_video(feed_url, mode, entry, vid)
             set_feed_baseline(feed_url, pub)
@@ -269,6 +304,9 @@ def process_channel(channel_id: str, mode: str):
         # Subsequent: strictly newer than baseline, oldest→newest
         to_process = [(p, e, v) for (p, e, v) in rows if p > baseline]
         to_process.sort(key=lambda t: t[0])
+        dlog("to_process count:", len(to_process))
+        if not to_process:
+            dlog("no items newer than baseline for feed:", feed_url)
 
         for pub, entry, vid in to_process[:8]:  # safety cap
             handle_video(feed_url, mode, entry, vid)
@@ -285,6 +323,7 @@ def handle_video(feed_url: str, mode: str, entry, video_id: str):
     title = (entry.get("title") or "").strip()
 
     if already_seen(feed_url, guid, video_id):
+        dlog("skip: already_seen", guid)
         return
 
     try:
@@ -300,16 +339,15 @@ def handle_video(feed_url: str, mode: str, entry, video_id: str):
     # find first keyword hit to get a timestamp + local snippet
     start_sec, matched_text = first_keyword_hit(segs)
     if start_sec is None:
-        # No direct keyword hit — let Gemini decide from entire transcript in "blazers" mode,
-        # but for "national" we keep it strict to reduce false positives.
+        dlog("no direct keyword hit in transcript; mode=", mode)
+        # No direct keyword hit — allow Gemini for "blazers" feeds, stricter for "national"
         if mode == "national":
             mark_seen(feed_url, guid, video_id, pub)
             return
         snippet = full_text[:4000]
         jump = 0
     else:
-        # Build ~2-3 min window after the hit (like your old logic)
-        window_end = start_sec + 180
+        window_end = start_sec + 180  # ~3 minutes after
         window_texts = [t for (s, dur, t) in segs if s >= start_sec and s <= window_end]
         snippet = " ".join(window_texts)[:8000]
         jump = start_sec
@@ -324,6 +362,7 @@ def handle_video(feed_url: str, mode: str, entry, video_id: str):
     )
     out = gemini_json(prompt, snippet)
     if not out.get("is_blazers"):
+        dlog("gemini says not blazers; marking seen", video_id)
         mark_seen(feed_url, guid, video_id, pub)
         return
 
@@ -341,6 +380,10 @@ def handle_video(feed_url: str, mode: str, entry, video_id: str):
 
 # ---------------- Loop ----------------
 def loop():
+    global FORCE_ONE_SHOT
+    if FORCE_ONE_SHOT:
+        dlog("FORCE_ONE_SHOT enabled: will process the newest item once, then disable")
+
     while True:
         log("polling…")
 
@@ -359,6 +402,11 @@ def loop():
                 log("skip (no youtube_channel_id)", f.get("youtube_search") or f.get("rss"))
                 continue
             process_channel(cid, "blazers")
+
+        # Turn off FORCE_ONE_SHOT after the first loop to avoid repeat posting
+        if FORCE_ONE_SHOT:
+            FORCE_ONE_SHOT = False
+            dlog("FORCE_ONE_SHOT completed; set to False")
 
         log("sleep", POLL_INTERVAL_SECONDS, "s")
         time.sleep(POLL_INTERVAL_SECONDS)
