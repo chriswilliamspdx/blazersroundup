@@ -12,5 +12,8 @@ node_modules
 web/node_modules
 
 # Explicitly include these (in case of broader patterns above)
+!worker
 !worker/**
+!config
 !config/**
+
