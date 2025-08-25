@@ -441,15 +441,7 @@ def get_transcript_text(video_id: str) -> tuple[str, list]:
     except (NoTranscriptFound, TranscriptsDisabled, CouldNotRetrieveTranscript) as e:
         log("youtube-transcript-api says no transcript; trying yt-dlp fallback:", video_id, str(e))
     except Exception as e:
-        log("youtube-transcript-api failed; using yt-dlp fallback:", video_id, str(e))
-
-    # Fallback
-    return _fallback_transcript_via_ytdlp(video_id)
-    except (NoTranscriptFound, TranscriptsDisabled, CouldNotRetrieveTranscript):
-        # pass to fallback
-        pass
-    except Exception as e:
-        # This captures your "no element found: line 1, column 0" case and similar HTML/empty responses.
+        # Handles cases like HTML responses or "no element found: line 1, column 0"
         log("youtube-transcript-api failed; using yt-dlp fallback:", video_id, str(e))
 
     # Fallback via yt-dlp (no video download)
@@ -686,7 +678,7 @@ def loop():
                 log("skip (no youtube_channel_id)", f.get("youtube_search") or f.get("rss"))
                 continue
             process_channel(cid, "national")
-                        time.sleep(SCAN_PAUSE_SECONDS)
+            time.sleep(SCAN_PAUSE_SECONDS)
 
         # Blazers-specific shows
         for f in CONFIG.get("blazers_feeds", []):
@@ -695,7 +687,7 @@ def loop():
                 log("skip (no youtube_channel_id)", f.get("youtube_search") or f.get("rss"))
                 continue
             process_channel(cid, "blazers")
-                        time.sleep(SCAN_PAUSE_SECONDS)
+            time.sleep(SCAN_PAUSE_SECONDS)
 
         # Turn off FORCE_ONE_SHOT after the first loop to avoid repeat posting
         if FORCE_ONE_SHOT:
