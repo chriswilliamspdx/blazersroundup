@@ -48,6 +48,12 @@ FORCE_ONE_SHOT = os.getenv("FORCE_ONE_SHOT", "0") == "1"  # process newest item 
 LA = tz.gettz(TIMEZONE)
 UTC = tz.UTC
 
+# --- YouTube/yt-dlp tuning (anti-bot) ---
+YTDLP_COOKIES = os.getenv("YTDLP_COOKIES")  # optional: /app/cookies.txt (exported from your browser)
+YTDLP_EXTRACTOR_CLIENTS = [s.strip() for s in os.getenv("YTDLP_EXTRACTOR_CLIENTS", "android,web").split(",")]
+YTDLP_SLEEP_REQUESTS = float(os.getenv("YTDLP_SLEEP_REQUESTS", "1.0"))  # seconds between internal requests
+SCAN_PAUSE_SECONDS = float(os.getenv("SCAN_PAUSE_SECONDS", "0.7"))      # pause between channels to look less bot-like
+
 def dlog(*args):
     if DEBUG:
         print("[debug]", *args, flush=True)
@@ -298,19 +304,147 @@ def _fallback_transcript_via_ytdlp(video_id: str):
     full_text = ' '.join(t for (_, _, t) in segs if t)
     return full_text, segs
 
+def _parse_json3_to_segments(text: str):
+    try:
+        data = json.loads(text)
+    except Exception as e:
+        log("json3 parse error", e)
+        return []
+    segs = []
+    for ev in data.get("events", []):
+        seglist = ev.get("segs")
+        if not seglist:
+            continue
+        t = "".join(s.get("utf8", "") for s in seglist).strip()
+        if not t:
+            continue
+        start = float(ev.get("tStartMs", 0)) / 1000.0
+        dur = float(ev.get("dDurationMs", 0)) / 1000.0
+        segs.append((start, dur, t))
+    return segs
+
+def _parse_vtt_to_segments(text: str):
+    segs = []
+    # Split on blank lines (blocks)
+    for block in re.split(r"\n\n+", text.strip()):
+        lines = [ln for ln in block.strip().splitlines() if ln.strip()]
+        if not lines:
+            continue
+        if lines[0].strip().upper() == "WEBVTT":
+            # drop header line
+            lines = lines[1:]
+            if not lines:
+                continue
+        # find time line
+        time_line = None
+        for ln in lines:
+            if "-->" in ln:
+                time_line = ln
+                break
+        if not time_line:
+            continue
+        m = re.search(
+            r"(?P<start>\d+:\d{2}:\d{2}\.\d+|\d{1,2}:\d{2}\.\d+)\s*-->\s*(?P<end>\d+:\d{2}:\d{2}\.\d+|\d{1,2}:\d{2}\.\d+)",
+            time_line,
+        )
+        if not m:
+            continue
+        def _to_sec(s: str) -> float:
+            parts = s.split(":")
+            if len(parts) == 3:
+                h, m, sf = parts
+                return int(h) * 3600 + int(m) * 60 + float(sf)
+            m, sf = parts
+            return int(m) * 60 + float(sf)
+        start = _to_sec(m.group("start"))
+        end = _to_sec(m.group("end"))
+        # everything after the time line is text
+        start_idx = lines.index(time_line) + 1
+        txt = " ".join(lines[start_idx:]).strip()
+        if not txt:
+            continue
+        txt = re.sub(r"<[^>]+>", "", txt)      # remove tags
+        txt = re.sub(r"\s+", " ", txt).strip() # collapse spaces
+        segs.append((start, max(0.0, end - start), txt))
+    return segs
+
+def _fallback_transcript_via_ytdlp(video_id: str):
+    """
+    Fetch subtitles (manual or auto) using yt-dlp without downloading the video.
+    Prefer English and json3/vtt tracks. Uses Android client to reduce bot checks.
+    """
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    ydl_opts = {
+        "quiet": True,
+        "skip_download": True,
+        "sleep_requests": YTDLP_SLEEP_REQUESTS,
+        "extractor_args": {"youtube": {"player_client": YTDLP_EXTRACTOR_CLIENTS}},
+    }
+    if YTDLP_COOKIES:
+        ydl_opts["cookiefile"] = YTDLP_COOKIES
+        log("yt-dlp using cookies file", YTDLP_COOKIES)
+
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    subs = info.get("subtitles") or {}
+    autos = info.get("automatic_captions") or {}
+    tracks_by_lang = {}
+    for lang in ("en", "en-US", "en-GB"):
+        if lang in subs:
+            tracks_by_lang[lang] = subs[lang]
+        elif lang in autos:
+            tracks_by_lang[lang] = autos[lang]
+    if not tracks_by_lang:
+        raise NoTranscriptFound("yt-dlp: no English subtitles or auto-captions found")
+
+    fmt_order = ["json3", "vtt", "ttml", "srv3", "srv2", "srv1"]
+    chosen_url, chosen_ext = None, None
+    for lang, lst in tracks_by_lang.items():
+        ranked = sorted(lst, key=lambda x: fmt_order.index(x.get("ext", "vtt")) if x.get("ext") in fmt_order else 99)
+        if ranked:
+            chosen_url = ranked[0].get("url")
+            chosen_ext = ranked[0].get("ext")
+            break
+    if not chosen_url:
+        raise NoTranscriptFound("yt-dlp: could not choose captions URL")
+
+    with YoutubeDL({"quiet": True}) as ydl:
+        data = ydl.urlopen(chosen_url).read()
+    body = data.decode("utf-8", "ignore")
+
+    if chosen_ext == "json3":
+        segs = _parse_json3_to_segments(body)
+    else:
+        segs = _parse_vtt_to_segments(body)
+    if not segs:
+        raise NoTranscriptFound("yt-dlp: parsed 0 segments")
+
+    full_text = " ".join(t for (_, _, t) in segs if t)
+    return full_text, segs
+
 def get_transcript_text(video_id: str) -> tuple[str, list]:
     """
-    Primary (youtube-transcript-api) with a yt-dlp fallback.
+    Primary: youtube-transcript-api (no API key).
+    Fallback: yt-dlp subtitles (Android client + small sleeps; optional cookies).
     Returns (full_text, segments) or raises NoTranscriptFound / TranscriptsDisabled.
     """
-    # Try youtube-transcript-api first (fastest when it works)
     try:
         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en", "en-US", "en-GB"])
-        segs = [(float(t.get("start", 0.0)), float(t.get("duration", 0.0)), t.get("text", "").strip())
-                for t in transcript]
+        segs = [
+            (float(t.get("start", 0.0)), float(t.get("duration", 0.0)), t.get("text", "").strip())
+            for t in transcript
+        ]
         full_text = " ".join(s[2] for s in segs if s[2])
         if full_text:
             return full_text, segs
+    except (NoTranscriptFound, TranscriptsDisabled, CouldNotRetrieveTranscript) as e:
+        log("youtube-transcript-api says no transcript; trying yt-dlp fallback:", video_id, str(e))
+    except Exception as e:
+        log("youtube-transcript-api failed; using yt-dlp fallback:", video_id, str(e))
+
+    # Fallback
+    return _fallback_transcript_via_ytdlp(video_id)
     except (NoTranscriptFound, TranscriptsDisabled, CouldNotRetrieveTranscript):
         # pass to fallback
         pass
@@ -552,6 +686,7 @@ def loop():
                 log("skip (no youtube_channel_id)", f.get("youtube_search") or f.get("rss"))
                 continue
             process_channel(cid, "national")
+                        time.sleep(SCAN_PAUSE_SECONDS)
 
         # Blazers-specific shows
         for f in CONFIG.get("blazers_feeds", []):
@@ -560,6 +695,7 @@ def loop():
                 log("skip (no youtube_channel_id)", f.get("youtube_search") or f.get("rss"))
                 continue
             process_channel(cid, "blazers")
+                        time.sleep(SCAN_PAUSE_SECONDS)
 
         # Turn off FORCE_ONE_SHOT after the first loop to avoid repeat posting
         if FORCE_ONE_SHOT:
