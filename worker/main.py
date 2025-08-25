@@ -154,43 +154,45 @@ def parse_youtube_video_id(entry) -> str | None:
 def get_transcript_text(video_id: str) -> tuple[str, list]:
     """
     Return (full_text, segments) where segments = [(start, dur, text), ...].
-    Works across youtube-transcript-api versions by trying both the
-    static method and the transcript-list API.
+    Uses youtube-transcript-api list_transcripts() to prefer manual English,
+    then fall back to auto-generated English.
     """
-    transcript = None
+    # Ensure we're on a new enough library
+    if not hasattr(YouTubeTranscriptApi, "list_transcripts"):
+        raise RuntimeError(
+            "youtube-transcript-api is too old. Please pin youtube-transcript-api>=0.6.2"
+        )
 
-    # Try the common static method first (present in many releases)
+    # Get the transcript list for the video
     try:
-        if hasattr(YT, "get_transcript"):
-            transcript = YT.get_transcript(video_id, languages=["en", "en-US", "en-GB"])
-    except NoTranscriptFound:
-        transcript = None
-    except (TranscriptsDisabled, CouldNotRetrieveTranscript) as e:
+        transcripts = YouTubeTranscriptApi.list_transcripts(video_id)
+    except TranscriptsDisabled as e:
+        # Captions are disabled on this video
         raise e
-    except AttributeError:
-        # Older/newer version without the static method – fall through to list_transcripts
-        transcript = None
+    except CouldNotRetrieveTranscript as e:
+        # Video private/region-blocked/age-restricted, etc.
+        raise e
 
-    # Fallback: use the transcripts list API (present across versions)
-    if transcript is None:
+    # Prefer a manually created English transcript
+    transcript_obj = None
+    try:
+        transcript_obj = transcripts.find_transcript(["en", "en-US", "en-GB"])
+    except NoTranscriptFound:
+        # Fall back to generated English
         try:
-            tl = YT.list_transcripts(video_id)
-            # Prefer manually created English, else auto-generated English
-            try:
-                transcript = tl.find_manually_created_transcript(["en", "en-US", "en-GB"]).fetch()
-            except Exception:
-                transcript = tl.find_generated_transcript(["en", "en-US", "en-GB"]).fetch()
-        except NoTranscriptFound:
-            raise
-        except (TranscriptsDisabled, CouldNotRetrieveTranscript) as e:
+            transcript_obj = transcripts.find_generated_transcript(["en", "en-US", "en-GB"])
+        except NoTranscriptFound as e:
+            # Nothing usable
             raise e
 
-    # transcript is a list of dicts: {'text':..., 'start':..., 'duration':...}
+    # Fetch the segments
+    data = transcript_obj.fetch()  # [{text,start,duration}, ...]
     segs = [
-        (float(t.get("start", 0.0)), float(t.get("duration", 0.0)), (t.get("text") or "").strip())
-        for t in (transcript or [])
+        (float(item.get("start", 0.0)), float(item.get("duration", 0.0)), (item.get("text") or "").strip())
+        for item in data
+        if (item.get("text") or "").strip()
     ]
-    full_text = " ".join(s[2] for s in segs if s[2])
+    full_text = " ".join(t for (_, _, t) in segs)
     return full_text, segs
 
 def fmt_mmss(seconds: int) -> str:
