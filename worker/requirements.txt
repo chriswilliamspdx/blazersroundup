@@ -1,7 +1,7 @@
-pyyaml
-feedparser
-requests
-python-dateutil
-psycopg2-binary
-google-genai
-youtube-transcript-api==0.6.3
+feedparser==6.0.10
+PyYAML==6.0.2
+requests==2.32.3
+python-dateutil==2.9.0.post0
+psycopg2-binary==2.9.9
+google-genai==0.6.0
+youtube-transcript-api==0.6.2
