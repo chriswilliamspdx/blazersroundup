@@ -261,8 +261,15 @@ def mark_seen(feed_url, guid, media_id, published_at):
     )
 
 # ---------------- Gemini ----------------
-# Per https://ai.google.dev/gemini-api/docs/quickstart
-ai = genai.Client()  # uses GEMINI_API_KEY from env
+# Per https://ai.google.dev/gemini-api/docs/api-key
+# The SDK will recognize GEMINI_API_KEY or GOOGLE_API_KEY, but we pass explicitly for clarity.
+GEMINI_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+if not GEMINI_KEY:
+    raise RuntimeError("Missing GOOGLE_API_KEY / GEMINI_API_KEY in environment for Gemini API.")
+# Pass explicitly (also recommended by docs if auto-discovery isn't working)
+ai = genai.Client(api_key=GEMINI_KEY)
+# Optional, non-secret log (no key content):
+log("Gemini API key detected via", "GOOGLE_API_KEY" if os.getenv("GOOGLE_API_KEY") else "GEMINI_API_KEY")
 
 def gemini_json(prompt, text):
     resp = ai.models.generate_content(
