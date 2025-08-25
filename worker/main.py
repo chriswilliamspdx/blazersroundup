@@ -27,6 +27,7 @@ from youtube_transcript_api import (
 )
 from google import genai
 from google.genai import types as gtypes
+from yt_dlp import YoutubeDL
 
 # ---------------- Env ----------------
 DB_URL = os.environ["DATABASE_URL"]
@@ -165,49 +166,160 @@ def parse_youtube_video_id(entry) -> str | None:
         return m.group(1)
     return None
 
+def _parse_vtt_to_segments(vtt_text: str):
+    """
+    Very small VTT parser -> [(start, dur, text), ...]
+    Accepts HH:MM:SS.mmm or MM:SS.mmm; commas or dots for millis.
+    """
+    def _to_seconds(ts: str) -> float:
+        ts = ts.strip().replace(',', '.')
+        parts = ts.split(':')
+        if len(parts) == 3:
+            h, m, s = parts
+            return int(h) * 3600 + int(m) * 60 + float(s)
+        elif len(parts) == 2:
+            m, s = parts
+            return int(m) * 60 + float(s)
+        return float(ts)
+
+    segs = []
+    lines = [ln.rstrip('\r') for ln in vtt_text.splitlines()]
+    i = 0
+    while i < len(lines):
+        ln = lines[i].strip()
+        i += 1
+        if not ln or ln.upper().startswith('WEBVTT') or ln.startswith('NOTE'):
+            continue
+        # Optional cue id line (numeric or text); next should be timecode
+        time_line = ln
+        if '-->' not in time_line and i < len(lines):
+            time_line = lines[i].strip()
+            i += 1
+        if '-->' not in time_line:
+            continue
+        try:
+            start_s, end_s = [p.strip() for p in time_line.split('-->')[:2]]
+            start = _to_seconds(start_s)
+            end = _to_seconds(end_s)
+        except Exception:
+            continue
+        # collect cue text until blank line
+        texts = []
+        while i < len(lines) and lines[i].strip():
+            texts.append(lines[i].strip())
+            i += 1
+        # skip blank separator
+        while i < len(lines) and not lines[i].strip():
+            i += 1
+        cue = ' '.join(texts).strip()
+        if cue:
+            segs.append((start, max(0.0, end - start), cue))
+    return segs
+
+def _parse_json3_to_segments(json_text: str):
+    """
+    Parse YouTube 'json3' captions (srv3) => [(start, dur, text), ...]
+    """
+    data = json.loads(json_text)
+    segs = []
+    for ev in data.get('events', []):
+        seg_list = ev.get('segs')
+        if not seg_list:
+            continue
+        text = ''.join(seg.get('utf8', '') for seg in seg_list).strip()
+        if not text:
+            continue
+        start = float(ev.get('tStartMs', 0)) / 1000.0
+        dur = float(ev.get('dDurationMs', 0)) / 1000.0 if ev.get('dDurationMs') is not None else 0.0
+        segs.append((start, dur, text))
+    return segs
+
+def _fallback_transcript_via_ytdlp(video_id: str):
+    """
+    Fetch subtitles (manual or auto) using yt-dlp without downloading the video.
+    Prefer English and .vtt or json3 tracks.
+    """
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    # no download; quiet output
+    ydl_opts = {
+        'quiet': True,
+        'skip_download': True,
+        # No need to write files; we’ll fetch the caption URL ourselves
+    }
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    # Both keys may exist; prefer authored subs over auto
+    tracks_by_lang = {}
+    subs = info.get('subtitles') or {}
+    autos = info.get('automatic_captions') or {}
+
+    for lang in ['en', 'en-US', 'en-GB']:
+        if lang in subs:
+            tracks_by_lang[lang] = subs[lang]
+        elif lang in autos:
+            tracks_by_lang[lang] = autos[lang]
+
+    if not tracks_by_lang:
+        raise NoTranscriptFound("yt-dlp: no English subtitles or auto-captions found")
+
+    # Choose one URL, preferring json3 or vtt
+    fmt_order = ['json3', 'vtt', 'ttml', 'srv3', 'srv2', 'srv1']
+    chosen = None
+    chosen_ext = None
+    for lang, lst in tracks_by_lang.items():
+        # Each item has {'ext': 'vtt'|'json3'|..., 'url': '...'}
+        lst_sorted = sorted(
+            lst,
+            key=lambda x: fmt_order.index(x.get('ext', 'vtt')) if x.get('ext') in fmt_order else 99
+        )
+        if lst_sorted:
+            chosen = lst_sorted[0].get('url')
+            chosen_ext = lst_sorted[0].get('ext')
+            break
+
+    if not chosen:
+        raise NoTranscriptFound("yt-dlp: could not choose a captions URL")
+
+    # Download the caption file itself (tiny)
+    with YoutubeDL({'quiet': True}) as ydl:
+        data = ydl.urlopen(chosen).read()
+
+    text = data.decode('utf-8', 'ignore')
+    if chosen_ext == 'json3':
+        segs = _parse_json3_to_segments(text)
+    else:
+        # treat vtt/ttml/srvN roughly as VTT; VTT works for most YouTube caption URLs
+        segs = _parse_vtt_to_segments(text)
+
+    if not segs:
+        raise NoTranscriptFound("yt-dlp: parsed 0 segments")
+
+    full_text = ' '.join(t for (_, _, t) in segs if t)
+    return full_text, segs
+
 def get_transcript_text(video_id: str) -> tuple[str, list]:
     """
-    Return (full_text, segments) where segments = [(start, dur, text), ...].
-    Uses youtube-transcript-api list_transcripts() to prefer manual English,
-    then fall back to auto-generated English.
+    Primary (youtube-transcript-api) with a yt-dlp fallback.
+    Returns (full_text, segments) or raises NoTranscriptFound / TranscriptsDisabled.
     """
-    # Ensure we're on a new enough library
-    if not hasattr(YouTubeTranscriptApi, "list_transcripts"):
-        raise RuntimeError(
-            "youtube-transcript-api is too old. Please pin youtube-transcript-api>=0.6.2"
-        )
-
-    # Get the transcript list for the video
+    # Try youtube-transcript-api first (fastest when it works)
     try:
-        transcripts = YouTubeTranscriptApi.list_transcripts(video_id)
-    except TranscriptsDisabled as e:
-        # Captions are disabled on this video
-        raise e
-    except CouldNotRetrieveTranscript as e:
-        # Video private/region-blocked/age-restricted, etc.
-        raise e
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en", "en-US", "en-GB"])
+        segs = [(float(t.get("start", 0.0)), float(t.get("duration", 0.0)), t.get("text", "").strip())
+                for t in transcript]
+        full_text = " ".join(s[2] for s in segs if s[2])
+        if full_text:
+            return full_text, segs
+    except (NoTranscriptFound, TranscriptsDisabled, CouldNotRetrieveTranscript):
+        # pass to fallback
+        pass
+    except Exception as e:
+        # This captures your "no element found: line 1, column 0" case and similar HTML/empty responses.
+        log("youtube-transcript-api failed; using yt-dlp fallback:", video_id, str(e))
 
-    # Prefer a manually created English transcript
-    transcript_obj = None
-    try:
-        transcript_obj = transcripts.find_transcript(["en", "en-US", "en-GB"])
-    except NoTranscriptFound:
-        # Fall back to generated English
-        try:
-            transcript_obj = transcripts.find_generated_transcript(["en", "en-US", "en-GB"])
-        except NoTranscriptFound as e:
-            # Nothing usable
-            raise e
-
-    # Fetch the segments
-    data = transcript_obj.fetch()  # [{text,start,duration}, ...]
-    segs = [
-        (float(item.get("start", 0.0)), float(item.get("duration", 0.0)), (item.get("text") or "").strip())
-        for item in data
-        if (item.get("text") or "").strip()
-    ]
-    full_text = " ".join(t for (_, _, t) in segs)
-    return full_text, segs
+    # Fallback via yt-dlp (no video download)
+    return _fallback_transcript_via_ytdlp(video_id)
 
 def fmt_mmss(seconds: int) -> str:
     m = seconds // 60
