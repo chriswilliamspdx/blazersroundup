@@ -1,40 +1,37 @@
 import os, time, io, re, json, math, hashlib
 import feedparser, requests, yaml
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from dateutil import parser as dtparse, tz
-from pydub import AudioSegment
-from faster_whisper import WhisperModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled, CouldNotRetrieveTranscript
 from google import genai
 from google.genai import types as gtypes
-import subprocess
 
+# ---------------- Env ----------------
 DB_URL = os.environ["DATABASE_URL"]
-WEB_BASE_URL = os.environ["WEB_BASE_URL"]
+WEB_BASE_URL = os.environ["WEB_BASE_URL"].rstrip("/")
 INTERNAL_API_TOKEN = os.environ["INTERNAL_API_TOKEN"]
-SPOTIFY_CLIENT_ID = os.environ["SPOTIFY_CLIENT_ID"]
-SPOTIFY_CLIENT_SECRET = os.environ["SPOTIFY_CLIENT_SECRET"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+
+# Optional: where to read config (default to the YouTube-only config you generated)
+FEEDS_PATH = os.getenv("FEEDS_PATH", "/app/config/feeds.youtube.yaml")
+
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "600"))
 TIMEZONE = os.getenv("TIMEZONE", "America/Los_Angeles")
-RAW_WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
-# tolerate accidental suffixes like "-int8" or "-int8_float32"
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
-
 LA = tz.gettz(TIMEZONE)
 UTC = tz.UTC
 
-with open("/app/config/feeds.yaml", "r") as f:
+with open(FEEDS_PATH, "r", encoding="utf-8") as f:
     CONFIG = yaml.safe_load(f)
 
 POST_CHAR_LIMIT = int(CONFIG.get("post_char_limit", 300))
 KEYWORDS = [k.lower() for k in CONFIG.get("keywords_positive", [])]
+EXCLUDE_NOTE = CONFIG.get("exclude_note", "")
 
 def log(*args):
     print("[worker]", *args, flush=True)
 
-# --- DB helpers ---
+# ---------------- DB helpers ----------------
 conn = psycopg2.connect(DB_URL)
 conn.autocommit = True
 
@@ -46,7 +43,7 @@ def db_exec(sql, args=None):
         return []
 
 def ensure_schema():
-    # Base tables (safe to run repeatedly)
+    # state table
     db_exec("""
     create table if not exists state (
       key   text primary key,
@@ -54,6 +51,8 @@ def ensure_schema():
     );
     """)
 
+    # seen episodes: keep existing columns to avoid migrations.
+    # We'll store YouTube video IDs in spotify_episode_id column (name only; value is a YT ID).
     db_exec("""
     create table if not exists seen_episodes (
       id                 bigserial primary key,
@@ -65,8 +64,7 @@ def ensure_schema():
     );
     """)
 
-    # Expressions aren't allowed in a table-level UNIQUE constraint in Postgres.
-    # Enforce the same rule via a UNIQUE INDEX with expressions:
+    # Unique index (expression-based) to enforce dedupe by (feed_url, rss_guid, media_id)
     db_exec("""
     create unique index if not exists uq_seen
       on seen_episodes (
@@ -77,9 +75,8 @@ def ensure_schema():
     """)
 ensure_schema()
 
-# -------- Per-feed "latest episode baseline" helpers --------
+# ---------------- Baseline helpers ----------------
 def _baseline_key(feed_url: str) -> str:
-    # Avoid overly long keys by hashing the URL
     h = hashlib.sha1(feed_url.encode("utf-8")).hexdigest()
     return f"feed_baseline:{h}"
 
@@ -99,89 +96,122 @@ def set_feed_baseline(feed_url: str, dt_utc: datetime):
         [_baseline_key(feed_url), dt_utc.astimezone(UTC).isoformat()],
     )
 
-# --- Spotify API ---
-_spotify_token = None
-_spotify_token_exp = 0
-def spotify_token():
-    global _spotify_token, _spotify_token_exp
-    if _spotify_token and time.time() < _spotify_token_exp - 30:
-        return _spotify_token
-    resp = requests.post("https://accounts.spotify.com/api/token",
-                         data={"grant_type":"client_credentials"},
-                         auth=(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET),
-                         timeout=20)
-    resp.raise_for_status()
-    data = resp.json()
-    _spotify_token = data["access_token"]
-    _spotify_token_exp = time.time() + data["expires_in"]
-    return _spotify_token
+# ---------------- YouTube helpers ----------------
+def yt_channel_feed_url(channel_id: str) -> str:
+    return f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
 
-def spotify_get(url, params=None):
-    tok = spotify_token()
-    headers = {"Authorization": f"Bearer {tok}"}
-    r = requests.get(url, headers=headers, params=params or {}, timeout=30)
-    r.raise_for_status()
-    return r.json()
+def parse_youtube_video_id(entry) -> str:
+    """
+    Try multiple places to robustly extract a video ID from the YouTube channel RSS entry.
+    """
+    # 1) feedparser often exposes 'yt_videoid'
+    vid = entry.get("yt_videoid")
+    if vid:
+        return vid
+    # 2) entry.id like 'yt:video:VIDEOID'
+    eid = entry.get("id") or ""
+    m = re.search(r'[:/](?P<vid>[A-Za-z0-9_-]{6,})$', eid)
+    if m:
+        return m.group("vid")
+    # 3) entry.link like 'https://www.youtube.com/watch?v=VIDEOID'
+    link = entry.get("link") or ""
+    m = re.search(r'[?&]v=([A-Za-z0-9_-]{6,})', link)
+    if m:
+        return m.group(1)
+    return None
 
-def parse_spotify_show_id(show_url):
-    # https://open.spotify.com/show/<ID>(?...)?  -> <ID>
-    m = re.search(r'/show/([A-Za-z0-9]+)', show_url)
-    return m.group(1) if m else None
+def get_transcript_text(video_id: str) -> tuple[str, list]:
+    """
+    Return (full_text, segments) where segments = [(start, dur, text), ...]
+    Uses youtube-transcript-api (no API key). May fail if captions disabled.
+    """
+    # Try English (manual) then English (auto)
+    transcript = None
+    try:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
+    except NoTranscriptFound:
+        # as a fallback try auto-generated
+        try:
+            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en-US", "en-GB"])
+        except Exception:
+            raise
+    except (TranscriptsDisabled, CouldNotRetrieveTranscript) as e:
+        raise e
 
-def get_spotify_episode_for_title(show_id, title_guess):
-    # Fetch recent episodes, try title match (case-insensitive, punctuation-stripped), fallback to fuzzy contains.
-    data = spotify_get(f"https://api.spotify.com/v1/shows/{show_id}/episodes", params={"limit": 50, "market":"US"})
-    norm = lambda s: re.sub(r'[^a-z0-9 ]','', (s or "").lower())
-    tnorm = norm(title_guess or "")
-    best = None
-    for ep in data.get("items", []):
-        en = norm(ep.get("name",""))
-        if en == tnorm or (tnorm and tnorm in en) or (en and en in tnorm):
-            best = ep; break
-    return best
+    # transcript is list of dicts: {'text':..., 'start':..., 'duration':...}
+    segs = [(float(t.get("start", 0.0)), float(t.get("duration", 0.0)), t.get("text", "").strip()) for t in transcript]
+    full_text = " ".join(s[2] for s in segs if s[2])
+    return full_text, segs
 
-def spotify_timestamp_link(ep_id, seconds):
-    # Best-effort timestamp param
-    return f"https://open.spotify.com/episode/{ep_id}?t={int(seconds)}"
-
-def fmt_mmss(seconds):
+def fmt_mmss(seconds: int) -> str:
     m = seconds // 60
     s = seconds % 60
     return f"{int(m):02d}:{int(s):02d}"
 
-# --- Whisper ---
-# --- Whisper ---
-log("Loading faster-whisper model:", WHISPER_MODEL)
-# normalize accidental "-int8" suffix in env (int8 is a compute_type, not a model id)
-_model_name = WHISPER_MODEL.replace("-int8", "")
-try:
-    whisper = WhisperModel(_model_name, device="cpu", compute_type="int8")
-except ValueError as e:
-    log("Whisper model init failed:", e,
-        "Set WHISPER_MODEL to one of: tiny, base, small, medium, large-v2, distil-*, etc.")
-    raise
+def clamp(text, limit=POST_CHAR_LIMIT):
+    if len(text) <= limit:
+        return text
+    return text[:limit-1] + "…"
 
-# --- Gemini ---
-# --- Gemini ---
-_gemini_key = os.environ.get("GEMINI_API_KEY")
-if not _gemini_key:
-    raise RuntimeError("GEMINI_API_KEY is not set")
-ai = genai.Client(api_key=_gemini_key)
+def first_keyword_hit(segs: list) -> tuple[int|None, str|None]:
+    """
+    Find first segment that contains any of the target keywords.
+    Returns (start_seconds, matched_text) or (None, None).
+    """
+    for (start, dur, text) in segs:
+        low = text.lower()
+        if any(k in low for k in KEYWORDS):
+            return int(math.floor(start)), text
+    return None, None
+
+# ---------------- Posting ----------------
+def create_thread(first_text, second_text):
+    payload = {"firstText": first_text, "secondText": second_text}
+    r = requests.post(
+        f"{WEB_BASE_URL}/post-thread",
+        headers={"Content-Type": "application/json", "X-Internal-Token": INTERNAL_API_TOKEN},
+        data=json.dumps(payload),
+        timeout=60,
+    )
+    if r.status_code != 200:
+        log("post-thread failed", r.status_code, r.text)
+    else:
+        log("posted thread ok")
+
+# ---------------- Dedupe ----------------
+def already_seen(feed_url, guid, media_id):
+    rows = db_exec(
+        "select 1 from seen_episodes "
+        "where feed_url=%s and coalesce(rss_guid,'')=coalesce(%s,'') and coalesce(spotify_episode_id,'')=coalesce(%s,'')",
+        [feed_url, guid, media_id],
+    )
+    return bool(rows)
+
+def mark_seen(feed_url, guid, media_id, published_at):
+    db_exec(
+        "insert into seen_episodes(feed_url, rss_guid, spotify_episode_id, published_at) "
+        "values(%s, %s, %s, %s) on conflict do nothing",
+        [feed_url, guid, media_id, published_at],
+    )
+
+# ---------------- Gemini ----------------
+# Per https://ai.google.dev/gemini-api/docs/quickstart (Python)
+ai = genai.Client()  # reads GEMINI_API_KEY from env
 
 def gemini_json(prompt, text):
     resp = ai.models.generate_content(
         model="gemini-2.5-flash-lite",
-        contents=[{"role":"user","parts":[{"text": prompt + "\n\n" + text}]}],
+        contents=[{"role": "user", "parts": [{"text": prompt + "\n\n" + text}]}],
         config=gtypes.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema={
-                "type":"object",
-                "properties":{
-                    "is_blazers":{"type":"boolean"},
-                    "topic":{"type":"string"},
-                    "summary":{"type":"string"}
+                "type": "object",
+                "properties": {
+                    "is_blazers": {"type": "boolean"},
+                    "topic": {"type": "string"},
+                    "summary": {"type": "string"},
                 },
-                "required":["is_blazers"]
+                "required": ["is_blazers"],
             },
             thinking_config=gtypes.ThinkingConfig(thinking_budget=0),
         ),
@@ -191,253 +221,145 @@ def gemini_json(prompt, text):
     except Exception:
         return {}
 
-def clamp(text, limit=POST_CHAR_LIMIT):
-    if len(text) <= limit:
-        return text
-    return text[:limit-1] + "…"
-
-def download_audio(enclosure_url):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; BlazersRoundup/1.0; +https://github.com/chriswilliamspdx/blazersroundup)"
-    }
-    r = requests.get(enclosure_url, timeout=120, stream=True, headers=headers)
-    r.raise_for_status()
-    content = r.content
-
-    # Guess format from Content-Type or URL
-    ctype = (r.headers.get("Content-Type") or "").lower()
-    url_l = enclosure_url.lower()
-    if "mpeg" in ctype or url_l.endswith(".mp3"):
-        fmt = "mp3"
-    elif "mp4" in ctype or "aac" in ctype or url_l.endswith(".m4a") or url_l.endswith(".mp4"):
-        fmt = "m4a"  # pydub/ffmpeg will handle AAC in MP4/M4A
-    elif "wav" in ctype or url_l.endswith(".wav"):
-        fmt = "wav"
-    else:
-        # Fallback: let ffmpeg sniff; most podcast enclosures are mp3
-        fmt = None
-
-    bio = io.BytesIO(content)
-    audio = AudioSegment.from_file(bio, format=fmt)  # explicit format when we know it
-    audio = audio.set_channels(1).set_frame_rate(16000)
-    buf = io.BytesIO()
-    audio.export(buf, format="wav")
-    return buf.getvalue()
-
-def transcribe(bytes_wav):
-    segments, _ = whisper.transcribe(bytes_wav, vad_filter=True, vad_parameters={"min_silence_duration_ms": 500})
-    texts = []
-    spans = []
-    for seg in segments:
-        texts.append(seg.text.strip())
-        spans.append((seg.start, seg.end, seg.text.strip()))
-    return " ".join(texts), spans
-
-def find_blazers_segments(spans):
-    # find earliest segment that contains any keyword; extend window
-    idxs = []
-    keys = KEYWORDS
-    for i, (start, end, text) in enumerate(spans):
-        low = text.lower()
-        if any(k in low for k in keys):
-            idxs.append(i)
-    if not idxs:
-        return None
-    first_i = idxs[0]
-    start_t = max(0, math.floor(spans[first_i][0] - 10))
-    end_t = math.floor(spans[min(first_i+30, len(spans)-1)][1])  # ~ up to ~2-3 min after
-    snippet = " ".join(t for (s,e,t) in spans if s>=start_t and e<=end_t)
-    return start_t, end_t, snippet
-
-def create_thread(first_text, second_text):
-    payload = {"firstText": first_text, "secondText": second_text}
-    r = requests.post(f"{WEB_BASE_URL}/post-thread",
-                      headers={"Content-Type":"application/json","X-Internal-Token": INTERNAL_API_TOKEN},
-                      data=json.dumps(payload),
-                      timeout=60)
-    if r.status_code != 200:
-        log("post-thread failed", r.status_code, r.text)
-    else:
-        log("posted thread ok")
-
-def already_seen(feed_url, guid, sp_id):
-    rows = db_exec("select 1 from seen_episodes where feed_url=%s and coalesce(rss_guid,'')=coalesce(%s,'') and coalesce(spotify_episode_id,'')=coalesce(%s,'')",
-                   [feed_url, guid, sp_id])
-    return bool(rows)
-
-def mark_seen(feed_url, guid, sp_id, published_at):
-    db_exec(
-        "insert into seen_episodes(feed_url, rss_guid, spotify_episode_id, published_at) "
-        "values(%s, %s, %s, %s) on conflict do nothing",
-        [feed_url, guid, sp_id, published_at],
-    )
-
+# ---------------- Core processing ----------------
 def parse_pubdate(entry):
-    # prefer explicit fields; fallback to now if missing
-    for k in ["published", "pubDate", "updated"]:
-        if k in entry:
-            try:
-                dt = dtparse.parse(entry[k])
-                if not dt.tzinfo: dt = dt.replace(tzinfo=UTC)
-                return dt.astimezone(UTC)
-            except Exception:
-                pass
+    # YouTube RSS has 'published' like "2025-08-22T17:11:00+00:00"
+    if "published" in entry:
+        try:
+            dt = dtparse.parse(entry["published"])
+            if not dt.tzinfo:
+                dt = dt.replace(tzinfo=UTC)
+            return dt.astimezone(UTC)
+        except Exception:
+            pass
     return datetime.now(UTC)
 
-# -------- Handlers --------
-def handle_national(feed_url, show_id, entry):
-    guid = entry.get("id") or entry.get("guid") or entry.get("link")
-    pub = parse_pubdate(entry)
-    if already_seen(feed_url, guid, None):
-        return
-    enc = enclosure_url(entry)
-    if not enc:
-        mark_seen(feed_url, guid, None, pub); return
-
-    log("downloading audio", enc)
-    audio = download_audio(enc)
-    full_text, spans = transcribe(audio)
-    seg = find_blazers_segments(spans)
-    if not seg:
-        mark_seen(feed_url, guid, None, pub); return
-
-    start_t, end_t, snippet = seg
-    prompt = ("Decide if the following podcast snippet is about the NBA team the Portland Trail Blazers. "
-              "Return JSON with fields: is_blazers (boolean), topic (short), summary (<=300 chars, neutral). "
-              "Only mark true if it clearly refers to the NBA team or its players/coaches/front office.")
-    out = gemini_json(prompt, snippet)
-    if not out.get("is_blazers"):
-        mark_seen(feed_url, guid, None, pub); return
-
-    topic = (out.get("topic") or "Blazers").strip()
-    title = entry.get("title","").strip()
-    ep = get_spotify_episode_for_title(show_id, title)
-    if not ep:
-        mark_seen(feed_url, guid, None, pub); return
-    sp_id = ep["id"]
-    link = spotify_timestamp_link(sp_id, start_t)
-    time_txt = fmt_mmss(start_t)
-
-    first = clamp(f"{title} — {time_txt} {topic} {link}", POST_CHAR_LIMIT)
-    second = clamp((out.get("summary","") or "").strip(), POST_CHAR_LIMIT)
-
-    create_thread(first, second)
-    mark_seen(feed_url, guid, sp_id, pub)
-
-def handle_blazers(feed_url, show_id, entry):
-    guid = entry.get("id") or entry.get("guid") or entry.get("link")
-    pub = parse_pubdate(entry)
-    if already_seen(feed_url, guid, None):
-        return
-    enc = enclosure_url(entry)
-    if not enc:
-        mark_seen(feed_url, guid, None, pub); return
-
-    log("downloading audio", enc)
-    audio = download_audio(enc)
-    full_text, spans = transcribe(audio)
-
-    out = ai.models.generate_content(
-        model="gemini-2.5-flash-lite",
-        contents=[{"role":"user","parts":[{"text": full_text[:50000]}]}],
-        config=gtypes.GenerateContentConfig(
-            response_mime_type="text/plain",
-            thinking_config=gtypes.ThinkingConfig(thinking_budget=0),
-        ),
-    )
-    summary = clamp((out.text or "").strip(), POST_CHAR_LIMIT)
-
-    title = entry.get("title","").strip()
-    ep = get_spotify_episode_for_title(show_id, title)
-    if not ep:
-        mark_seen(feed_url, guid, None, pub); return
-    sp_id = ep["id"]
-    link = f"https://open.spotify.com/episode/{sp_id}"
-
-    first = clamp(f"{title} {link}", POST_CHAR_LIMIT)
-    second = summary
-
-    create_thread(first, second)
-    mark_seen(feed_url, guid, sp_id, pub)
-
-def enclosure_url(entry):
-    if "links" in entry:
-        for l in entry["links"]:
-            if l.get("rel") == "enclosure" and l.get("type","").startswith("audio"):
-                return l.get("href")
-    if "enclosures" in entry and entry["enclosures"]:
-        return entry["enclosures"][0].get("href")
-    return None
-
-# -------- Feed processing with per-feed baseline --------
-def fetch_feed(feed_url: str):
-    # Use a real UA; some hosts block default clients
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; BlazersRoundup/1.0; +https://github.com/chriswilliamspdx/blazersroundup)"
-    }
-    r = requests.get(feed_url, headers=headers, timeout=30)
-    r.raise_for_status()
-    # Pass bytes to feedparser so we bypass any network shenanigans in feedparser
-    return feedparser.parse(r.content)
-
-def process_feed(feed_url, show_url, mode):
+def process_channel(channel_id: str, mode: str):
+    feed_url = yt_channel_feed_url(channel_id)
     try:
-        show_id = parse_spotify_show_id(show_url)
-        d = fetch_feed(feed_url)
-        log("feed fetched ok", feed_url, "entries:", len(getattr(d, "entries", [])))
+        d = feedparser.parse(feed_url)
         entries = list(d.entries)
         if not entries:
+            log("no entries for channel", channel_id)
             return
 
-        # Compute published timestamps for ordering
-        entries_with_pub = []
+        # Build (pub, entry, vid)
+        rows = []
         for e in entries:
+            vid = parse_youtube_video_id(e)
+            if not vid:
+                continue
             pub = parse_pubdate(e)
-            entries_with_pub.append((pub, e))
+            rows.append((pub, e, vid))
 
-        # Sort by published time descending (newest first)
-        entries_with_pub.sort(key=lambda t: t[0], reverse=True)
-        newest_pub = entries_with_pub[0][0]
+        if not rows:
+            return
 
+        rows.sort(key=lambda t: t[0], reverse=True)
+        newest_pub = rows[0][0]
         baseline = get_feed_baseline(feed_url)
 
+        # First run: process only most recent
         if baseline is None:
-            # First time seeing this feed:
-            # Process only the single most recent episode, then set baseline to its published time.
-            pub, latest_entry = entries_with_pub[0]
-            if mode == "national":
-                handle_national(feed_url, show_id, latest_entry)
-            else:
-                handle_blazers(feed_url, show_id, latest_entry)
+            pub, entry, vid = rows[0]
+            handle_video(feed_url, mode, entry, vid)
             set_feed_baseline(feed_url, pub)
             return
 
-        # Subsequent runs: process only entries strictly newer than baseline, in chronological order
-        to_process = [(p, e) for (p, e) in entries_with_pub if p > baseline]
-        # Process older -> newer so posts appear in order if multiple arrived between polls
+        # Subsequent: strictly newer than baseline, oldest→newest
+        to_process = [(p, e, v) for (p, e, v) in rows if p > baseline]
         to_process.sort(key=lambda t: t[0])
 
-        for pub, entry in to_process[:10]:  # safety cap
-            if mode == "national":
-                handle_national(feed_url, show_id, entry)
-            else:
-                handle_blazers(feed_url, show_id, entry)
+        for pub, entry, vid in to_process[:8]:  # safety cap
+            handle_video(feed_url, mode, entry, vid)
 
-        # Always move baseline forward to the newest publish time we see in the feed.
-        # This prevents re-scanning the same old list when none matched posting criteria.
         if newest_pub > baseline:
             set_feed_baseline(feed_url, newest_pub)
 
     except Exception as e:
-        log("feed error", feed_url, e)
+        log("channel error", channel_id, e)
 
+def handle_video(feed_url: str, mode: str, entry, video_id: str):
+    guid = entry.get("id") or entry.get("link") or video_id
+    pub = parse_pubdate(entry)
+    title = (entry.get("title") or "").strip()
+
+    if already_seen(feed_url, guid, video_id):
+        return
+
+    try:
+        full_text, segs = get_transcript_text(video_id)
+    except (NoTranscriptFound, TranscriptsDisabled, CouldNotRetrieveTranscript) as e:
+        log("no transcript", video_id, e)
+        mark_seen(feed_url, guid, video_id, pub)
+        return
+    except Exception as e:
+        log("transcript error", video_id, e)
+        return  # don't mark seen if we had a transient error
+
+    # find first keyword hit to get a timestamp + local snippet
+    start_sec, matched_text = first_keyword_hit(segs)
+    if start_sec is None:
+        # No direct keyword hit — let Gemini decide from entire transcript in "blazers" mode,
+        # but for "national" we keep it strict to reduce false positives.
+        if mode == "national":
+            mark_seen(feed_url, guid, video_id, pub)
+            return
+        snippet = full_text[:4000]
+        jump = 0
+    else:
+        # Build ~2-3 min window after the hit (like your old logic)
+        window_end = start_sec + 180
+        window_texts = [t for (s, dur, t) in segs if s >= start_sec and s <= window_end]
+        snippet = " ".join(window_texts)[:8000]
+        jump = start_sec
+
+    # Ask Gemini to judge & summarize (strict Blazers context)
+    prompt = (
+        "You will be given a snippet from a podcast transcript. "
+        "Decide if it is about the NBA team the Portland Trail Blazers (players, coaches, front office). "
+        "Exclude any generic 'trailblazer' usages not about the NBA team. "
+        f"{EXCLUDE_NOTE}\n\n"
+        "Return JSON with fields: is_blazers (boolean), topic (short string), summary (<=300 chars, neutral tone)."
+    )
+    out = gemini_json(prompt, snippet)
+    if not out.get("is_blazers"):
+        mark_seen(feed_url, guid, video_id, pub)
+        return
+
+    topic = (out.get("topic") or "Blazers").strip()
+    link = f"https://www.youtube.com/watch?v={video_id}"
+    if jump > 0:
+        link += f"&t={int(jump)}s"
+
+    time_txt = fmt_mmss(jump) if jump > 0 else ""
+    first = clamp(f"{title}{' — ' + time_txt if time_txt else ''} {topic} {link}", POST_CHAR_LIMIT)
+    second = clamp((out.get("summary", "") or "").strip(), POST_CHAR_LIMIT)
+
+    create_thread(first, second)
+    mark_seen(feed_url, guid, video_id, pub)
+
+# ---------------- Loop ----------------
 def loop():
     while True:
         log("polling…")
-        for f in CONFIG["national_feeds"]:
-            process_feed(f["rss"], f["spotify_show"], "national")
-        for f in CONFIG["blazers_feeds"]:
-            process_feed(f["rss"], f["spotify_show"], "blazers")
+
+        # National shows
+        for f in CONFIG.get("national_feeds", []):
+            cid = f.get("youtube_channel_id")
+            if not cid:
+                log("skip (no youtube_channel_id)", f.get("youtube_search") or f.get("rss"))
+                continue
+            process_channel(cid, "national")
+
+        # Blazers-specific shows
+        for f in CONFIG.get("blazers_feeds", []):
+            cid = f.get("youtube_channel_id")
+            if not cid:
+                log("skip (no youtube_channel_id)", f.get("youtube_search") or f.get("rss"))
+                continue
+            process_channel(cid, "blazers")
+
         log("sleep", POLL_INTERVAL_SECONDS, "s")
         time.sleep(POLL_INTERVAL_SECONDS)
 
