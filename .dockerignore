@@ -1,0 +1,16 @@
+# Keep Docker context small, but DO NOT ignore worker/ or config/
+.git
+.gitignore
+**/__pycache__/
+**/.pytest_cache/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.env
+*.log
+node_modules
+web/node_modules
+
+# Explicitly include these (in case of broader patterns above)
+!worker/**
+!config/**
