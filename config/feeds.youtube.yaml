@@ -1,0 +1,122 @@
+timezone: America/Los_Angeles
+poll_interval_seconds: 600
+post_char_limit: 300
+keywords_positive:
+- deni avdija
+- blake wesley
+- sidy cissoko
+- damian lillard
+- caleb love
+- yang hansen
+- donovan clingan
+- jrue holiday
+- duop reath
+- robert williams
+- jerami grant
+- matisse thybulle
+- toumani camara
+- rayan rupert
+- kris murray
+- scoot henderson
+- shaedon sharpe
+- portland trail blazers
+- portland
+- trail blazers
+- blazers
+- rip city
+- jody allen
+- joe cronin
+- mike schmitz
+- rip city remix
+- tom dundon
+exclude_note: All detections must be in the NBA Portland Trail Blazers context (no
+  generic 'trailblazer' meanings).
+national_feeds:
+- rss: https://feeds.megaphone.fm/zach-lowe
+  youtube_search: The Zach Lowe Show
+  youtube_channel_id: UCS5fdgvuA-fCPZQsk0unKnw
+- rss: https://feeds.megaphone.fm/ESP4033296397
+  youtube_search: Brian Windhorst & The Hoop Collective
+  youtube_channel_id: UCVSSpcmZD2PwPBqb8yKQKBA
+- rss: https://feeds.megaphone.fm/the-ringer-nba-show
+  youtube_search: The Ringer NBA Show
+  youtube_channel_id: UCT83YP07yVuaH9J19YABhlw
+- rss: https://feeds.acast.com/public/shows/6818c192eb737caf8cadd833
+  youtube_search: The Athletic NBA Daily
+  youtube_channel_id: UCtr-CNBa2RIdMJetS1hxJ2g
+- rss: https://feeds.acast.com/public/shows/68188c4aeb146d8e35bc5ca3
+  youtube_search: No Dunks
+  youtube_channel_id: UCi6Nwwk1pAp7gYwe3is7Y0g
+- rss: https://feeds.simplecast.com/JGGpY1xu
+  youtube_search: Dunc'd On Basketball NBA Podcast
+  youtube_channel_id: UC_fs6bgkAF9UgWNmJCvl8Pw
+- rss: https://feeds.simplecast.com/XThpxTzR
+  youtube_search: Locked On NBA – Daily Podcast On The National Basketball Association
+  youtube_channel_id: UCZkd1SsoIdSY-8FEvvwRyEw
+- rss: https://feeds.simplecast.com/A9Qn_Eje
+  youtube_search: Yahoo Sports NBA
+  youtube_channel_id: UCi9ACGG8NptsQhaMyezITEw
+- rss: https://www.spreaker.com/show/2916956/episodes/feed
+  youtube_search: 'Hardwood Knocks: An NBA Podcast'
+  youtube_channel_id: UCAh_va6JooBNAVg2xg86-nQ
+- rss: https://feeds.megaphone.fm/the-bill-simmons-podcast
+  youtube_search: The Bill Simmons Podcast
+  youtube_channel_id: UCP032AGFh2KzzIUGylB9BjA
+- rss: https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/3bb6ed46-a795-4116-b7ef-ae3900375e77/fd0a584d-3ada-4c93-bbe1-ae3900375e85/podcast.rss
+  youtube_search: All The Smoke
+  youtube_channel_id: UC2ozVs4pg2K3uFLw6-0ayCQ
+- rss: https://anchor.fm/s/485def10/podcast/rss
+  youtube_search: 'You Know Ball: A (Mostly) NBA Podcast'
+  youtube_channel_id: UCRwGfmzcQrhTQYugP0jmoZA
+- rss: https://feeds.simplecast.com/wiOjZJf6
+  youtube_search: Game Theory Podcast
+  youtube_channel_id: UCIPIrsv7JryabCokna5pY5A
+- rss: https://anchor.fm/s/86b2b318/podcast/rss
+  youtube_search: Thinking Basketball
+  youtube_channel_id: UC3HPbvB6f58X_7SMIp6OPYw
+- rss: https://feeds.megaphone.fm/basketballilluminati
+  youtube_search: Basketball Illuminati
+  youtube_channel_id: UCHlE0bG1iOkO2at-JzseKdQ
+- rss: https://feeds.simplecast.com/jpecpS5U
+  youtube_search: The NBA Front Office Podcast
+  youtube_channel_id: UC-bJU7MdQ4NW7zUbKChPp6Q
+- rss: https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/77a6df17-4a8a-4929-ac1b-b088010683dd/e3575515-668a-4eb8-8c52-b0880106843a/podcast.rss
+  youtube_search: Club 520 Podcast
+  youtube_channel_id: UCoA3lm9UTWDWK8Z1kcoWQcA
+- rss: https://feeds.megaphone.fm/the-ryen-russillo-podcast
+  youtube_search: The Ryen Russillo Podcast
+  youtube_channel_id: UChileQ5510GGzlgwvRqyiFA
+- rss: https://feeds.megaphone.fm/NSM6725424107
+  youtube_search: RealGM Radio
+  youtube_channel_id: UCX97uPIBC1XYUsK43wXpLYA
+- rss: https://www.spreaker.com/show/3211931/episodes/feed
+  youtube_search: Fastbreak Breakfast NBA Podcast
+  youtube_channel_id: UCt9OPdYh9weYNaYnF7ROZEQ
+blazers_feeds:
+- rss: http://feeds.megaphone.fm/lockedonblazers
+  youtube_search: http://feeds.megaphone.fm/lockedonblazers
+  youtube_channel_id: UCeE7WdPaNWwA-IZGfHek90Q
+- rss: https://anchor.fm/s/146511c/podcast/rss
+  youtube_search: 'We Have A Take: A Portland Trail Blazers Fan Podcast'
+  youtube_channel_id: UCyGBk64fCmmbeLFsa2Odp2Q
+- rss: https://feeds.simplecast.com/XZ1wZfs_
+  youtube_search: 'Jacked Ramsays: A Portland Trail Blazers Podcast'
+  youtube_channel_id: UCmNEPBzNMTHbc25O_v3IlXg
+- rss: http://feeds.megaphone.fm/blazerfocused
+  youtube_search: Blazer Focused
+  youtube_channel_id: UCra-NCIxn2Xl3Ssr5kqvuYA
+- rss: https://feeds.buzzsprout.com/2066763.rss
+  youtube_search: The Brief Case
+  youtube_channel_id: UCXk66yyzXo7-2M1BMqLhltQ
+- rss: https://feeds.megaphone.fm/ROMN1012807481
+  youtube_search: 'Rip City Roundtable: A Portland Trail Blazers Podcast'
+  youtube_channel_id: UCGk3rE7lAlTvtSM18UVBVuQ
+- rss: https://feeds.acast.com/public/shows/65ac80def653f800165c13fc
+  youtube_search: 'The Rose Garden Report: A Portland Trail Blazers and NBA Podcast'
+  youtube_channel_id: UC9YEk_-sQzPHWNHeuu9VP1A
+- rss: https://sagedigital.libsyn.com/rss
+  youtube_search: Holy Backboard
+  youtube_channel_id: UCSO0QAQiFPKQaMXBpBgNfLg
+- rss: https://feeds.megaphone.fm/ROMN6537468398
+  youtube_search: We Like the Blazers
+  youtube_channel_id: UCYvinFUqrrxarIqPU5trZig
