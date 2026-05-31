@@ -493,6 +493,10 @@ def loop():
     db.ensure_schema()
     summarizer = GeminiSummarizer(settings.gemini_key, settings.gemini_model)
     log("Gemini model", settings.gemini_model)
+    if transcript_settings.ytdlp_cookies:
+        log("yt-dlp cookies enabled")
+    else:
+        log("yt-dlp cookies not configured")
     if settings.dry_run:
         log("DRY_RUN enabled: posts and episode state will not be written")
 
