@@ -11,6 +11,8 @@ Two-service Railway app:
 2. Deploy **web** and complete Bluesky OAuth sign-in once.
 3. Deploy **worker** with Gemini credentials and the same internal token as `web`.
 
+Before enabling live worker posting, visit `/session/status` on the web service and confirm `haveSession` is true.
+
 ## Behavior
 
 - The worker uses `config/feeds.youtube.yaml` by default.
