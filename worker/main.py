@@ -46,6 +46,7 @@ class WorkerSettings:
     dry_run: bool
     dry_run_record_transcript_retries: bool
     force_one_shot: bool
+    force_transcript_retry: bool
     feed_mode: str
     scan_pause_seconds: float
     transcript_retry_minutes: int
@@ -71,6 +72,7 @@ class WorkerSettings:
             dry_run=os.getenv("DRY_RUN", "0") == "1",
             dry_run_record_transcript_retries=os.getenv("DRY_RUN_RECORD_TRANSCRIPT_RETRIES", "1") == "1",
             force_one_shot=os.getenv("FORCE_ONE_SHOT", "0") == "1",
+            force_transcript_retry=os.getenv("FORCE_TRANSCRIPT_RETRY", "0") == "1",
             feed_mode=os.getenv("FEED_MODE", "all").lower(),
             scan_pause_seconds=float(os.getenv("SCAN_PAUSE_SECONDS", "2.0")),
             transcript_retry_minutes=int(os.getenv("TRANSCRIPT_RETRY_MINUTES", "60")),
@@ -348,9 +350,11 @@ def handle_video(
     if db.already_seen(feed_url, guid, video_id):
         dlog(settings, "skip: already seen", video_id)
         return True
-    if not db.transcript_retry_ready(video_id, settings.transcript_max_attempts):
+    if not settings.force_transcript_retry and not db.transcript_retry_ready(video_id, settings.transcript_max_attempts):
         dlog(settings, "skip: transcript retry not due", video_id)
         return True
+    if settings.force_transcript_retry:
+        dlog(settings, "force transcript retry", video_id)
 
     try:
         result = fetch_transcript(video_id, transcript_settings, log=log)
