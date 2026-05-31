@@ -1,701 +1,486 @@
-import os, time, re, json, math, hashlib
-import feedparser, requests, yaml
+import hashlib
+import json
+import os
+import re
+import time
+from dataclasses import dataclass
 from datetime import datetime
-from dateutil import parser as dtparse, tz
+
+import feedparser
 import psycopg2
-from psycopg2.extras import RealDictCursor
-import youtube_transcript_api as yta
-# YouTube transcripts
-try:
-    from youtube_transcript_api import (
-        YouTubeTranscriptApi,
-        NoTranscriptFound,
-        TranscriptsDisabled,
-        CouldNotRetrieveTranscript,
-    )
-except ModuleNotFoundError as e:
-    # Make the error obvious at startup instead of a NameError later
-    raise RuntimeError(
-        "Missing dependency 'youtube-transcript-api'. "
-        "Add it to worker/requirements.txt and redeploy."
-    ) from e
-from youtube_transcript_api import (
-    YouTubeTranscriptApi as YT,
-    NoTranscriptFound,
-    TranscriptsDisabled,
-    CouldNotRetrieveTranscript,
-)
+import requests
+import yaml
+from dateutil import parser as dtparse, tz
 from google import genai
 from google.genai import types as gtypes
-from yt_dlp import YoutubeDL
+from psycopg2.extras import RealDictCursor
 
-# ---------------- Env ----------------
-DB_URL = os.environ["DATABASE_URL"]
-WEB_BASE_URL = os.environ["WEB_BASE_URL"].rstrip("/")
-INTERNAL_API_TOKEN = os.environ["INTERNAL_API_TOKEN"]
+from retry import next_retry_at_for_attempt, transcript_retry_due
+from text_utils import clamp_text, first_keyword_hit, fmt_mmss, transcript_window, youtube_link
+from transcript_providers import TranscriptError, fetch_transcript, settings_from_env
 
-# Optional: where to read config (defaults to YouTube-only if present; else falls back to feeds.yaml)
-DEFAULT_FEEDS_PATHS = [
-    os.getenv("FEEDS_PATH", "/app/config/feeds.youtube.yaml"),
-    "/app/config/feeds.yaml",
-]
 
-POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "600"))
-TIMEZONE = os.getenv("TIMEZONE", "America/Los_Angeles")
-DEBUG = os.getenv("DEBUG", "0") == "1"
-FORCE_ONE_SHOT = os.getenv("FORCE_ONE_SHOT", "0") == "1"  # process newest item once
-
-LA = tz.gettz(TIMEZONE)
 UTC = tz.UTC
 
-# --- YouTube/yt-dlp tuning (anti-bot) ---
-YTDLP_COOKIES = os.getenv("YTDLP_COOKIES")  # optional: /app/cookies.txt (exported from your browser)
-YTDLP_EXTRACTOR_CLIENTS = [s.strip() for s in os.getenv("YTDLP_EXTRACTOR_CLIENTS", "android,web").split(",")]
-YTDLP_SLEEP_REQUESTS = float(os.getenv("YTDLP_SLEEP_REQUESTS", "1.0"))  # seconds between internal requests
-SCAN_PAUSE_SECONDS = float(os.getenv("SCAN_PAUSE_SECONDS", "0.7"))      # pause between channels to look less bot-like
-
-def dlog(*args):
-    if DEBUG:
-        print("[debug]", *args, flush=True)
 
 def log(*args):
     print("[worker]", *args, flush=True)
 
-def _load_config():
-    last_err = None
-    for path in DEFAULT_FEEDS_PATHS:
+
+def dlog(settings, *args):
+    if settings.debug:
+        print("[debug]", *args, flush=True)
+
+
+@dataclass
+class WorkerSettings:
+    db_url: str
+    web_base_url: str
+    internal_api_token: str
+    gemini_key: str
+    gemini_model: str
+    feeds_paths: list[str]
+    poll_interval_seconds: int
+    timezone: str
+    debug: bool
+    dry_run: bool
+    force_one_shot: bool
+    scan_pause_seconds: float
+    transcript_retry_minutes: int
+    transcript_max_attempts: int
+
+    @classmethod
+    def from_env(cls):
+        return cls(
+            db_url=os.environ["DATABASE_URL"],
+            web_base_url=os.environ["WEB_BASE_URL"].rstrip("/"),
+            internal_api_token=os.environ["INTERNAL_API_TOKEN"],
+            gemini_key=os.getenv("GOOGLE_API_KEY") or os.environ["GEMINI_API_KEY"],
+            gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
+            feeds_paths=[
+                os.getenv("FEEDS_PATH", "/app/config/feeds.youtube.yaml"),
+                "/app/config/feeds.yaml",
+            ],
+            poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "600")),
+            timezone=os.getenv("TIMEZONE", "America/Los_Angeles"),
+            debug=os.getenv("DEBUG", "0") == "1",
+            dry_run=os.getenv("DRY_RUN", "0") == "1",
+            force_one_shot=os.getenv("FORCE_ONE_SHOT", "0") == "1",
+            scan_pause_seconds=float(os.getenv("SCAN_PAUSE_SECONDS", "0.7")),
+            transcript_retry_minutes=int(os.getenv("TRANSCRIPT_RETRY_MINUTES", "60")),
+            transcript_max_attempts=int(os.getenv("TRANSCRIPT_MAX_ATTEMPTS", "5")),
+        )
+
+
+def load_config(settings: WorkerSettings):
+    last_error = None
+    for path in settings.feeds_paths:
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-                dlog("loaded config from", path)
-                return cfg
-        except Exception as e:
-            last_err = e
-            continue
-    raise RuntimeError(f"Unable to load feeds config from {DEFAULT_FEEDS_PATHS}: {last_err}")
+            with open(path, "r", encoding="utf-8") as file:
+                config = yaml.safe_load(file) or {}
+            dlog(settings, "loaded config from", path)
+            return config
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Unable to load feeds config from {settings.feeds_paths}: {last_error}")
 
-CONFIG = _load_config()
 
-POST_CHAR_LIMIT = int(CONFIG.get("post_char_limit", 300))
-KEYWORDS = [k.lower() for k in CONFIG.get("keywords_positive", [])]
-EXCLUDE_NOTE = CONFIG.get("exclude_note", "")
+class Database:
+    def __init__(self, db_url: str):
+        self.conn = psycopg2.connect(db_url)
+        self.conn.autocommit = True
 
-dlog("config keys:", list(CONFIG.keys()))
-dlog(
-    "counts:",
-    "national_feeds=", len(CONFIG.get("national_feeds", [])),
-    "blazers_feeds=", len(CONFIG.get("blazers_feeds", [])),
-)
+    def exec(self, sql, args=None):
+        with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, args or [])
+            if cur.description:
+                return cur.fetchall()
+            return []
 
-# ---------------- DB helpers ----------------
-conn = psycopg2.connect(DB_URL)
-conn.autocommit = True
+    def ensure_schema(self):
+        self.exec(
+            """
+            create table if not exists state (
+              key text primary key,
+              value text not null
+            );
+            """
+        )
+        self.exec(
+            """
+            create table if not exists seen_episodes (
+              id bigserial primary key,
+              feed_url text not null,
+              rss_guid text,
+              spotify_episode_id text,
+              published_at timestamptz,
+              first_seen_at timestamptz default now()
+            );
+            """
+        )
+        self.exec(
+            """
+            create unique index if not exists uq_seen
+              on seen_episodes (
+                feed_url,
+                coalesce(rss_guid, ''),
+                coalesce(spotify_episode_id, '')
+              );
+            """
+        )
+        self.exec(
+            """
+            create table if not exists transcript_attempts (
+              video_id text primary key,
+              last_attempt_at timestamptz not null default now(),
+              attempt_count integer not null default 0,
+              last_error_type text,
+              next_retry_at timestamptz
+            );
+            """
+        )
 
-def db_exec(sql, args=None):
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(sql, args or [])
-        if cur.description:
-            return cur.fetchall()
-        return []
+    def _baseline_key(self, feed_url: str) -> str:
+        digest = hashlib.sha1(feed_url.encode("utf-8")).hexdigest()
+        return f"feed_baseline:{digest}"
 
-def ensure_schema():
-    # state table
-    db_exec("""
-    create table if not exists state (
-      key   text primary key,
-      value text not null
-    );
-    """)
-
-    # seen episodes: reuse existing columns; we'll store YouTube video IDs in spotify_episode_id column
-    db_exec("""
-    create table if not exists seen_episodes (
-      id                 bigserial primary key,
-      feed_url           text not null,
-      rss_guid           text,
-      spotify_episode_id text,
-      published_at       timestamptz,
-      first_seen_at      timestamptz default now()
-    );
-    """)
-
-    # Dedupe via UNIQUE INDEX with expressions
-    db_exec("""
-    create unique index if not exists uq_seen
-      on seen_episodes (
-        feed_url,
-        coalesce(rss_guid, ''),
-        coalesce(spotify_episode_id, '')
-      );
-    """)
-ensure_schema()
-
-# ---------------- Baseline helpers ----------------
-def _baseline_key(feed_url: str) -> str:
-    h = hashlib.sha1(feed_url.encode("utf-8")).hexdigest()
-    return f"feed_baseline:{h}"
-
-def get_feed_baseline(feed_url: str):
-    rows = db_exec("select value from state where key=%s", [_baseline_key(feed_url)])
-    if rows:
+    def get_feed_baseline(self, feed_url: str):
+        rows = self.exec("select value from state where key=%s", [self._baseline_key(feed_url)])
+        if not rows:
+            return None
         try:
             return dtparse.isoparse(rows[0]["value"])
         except Exception:
             return None
-    return None
 
-def set_feed_baseline(feed_url: str, dt_utc: datetime):
-    db_exec(
-        "insert into state(key, value) values(%s, %s) "
-        "on conflict (key) do update set value = excluded.value",
-        [_baseline_key(feed_url), dt_utc.astimezone(UTC).isoformat()],
-    )
+    def set_feed_baseline(self, feed_url: str, dt_utc: datetime):
+        self.exec(
+            "insert into state(key, value) values(%s, %s) "
+            "on conflict (key) do update set value = excluded.value",
+            [self._baseline_key(feed_url), dt_utc.astimezone(UTC).isoformat()],
+        )
 
-# ---------------- YouTube helpers ----------------
+    def already_seen(self, feed_url, guid, media_id):
+        rows = self.exec(
+            "select 1 from seen_episodes "
+            "where feed_url=%s and coalesce(rss_guid,'')=coalesce(%s,'') "
+            "and coalesce(spotify_episode_id,'')=coalesce(%s,'')",
+            [feed_url, guid, media_id],
+        )
+        return bool(rows)
+
+    def mark_seen(self, feed_url, guid, media_id, published_at):
+        self.exec(
+            "insert into seen_episodes(feed_url, rss_guid, spotify_episode_id, published_at) "
+            "values(%s, %s, %s, %s) on conflict do nothing",
+            [feed_url, guid, media_id, published_at],
+        )
+
+    def get_transcript_attempt(self, video_id: str):
+        rows = self.exec("select * from transcript_attempts where video_id=%s", [video_id])
+        return rows[0] if rows else None
+
+    def has_due_transcript_retry(self, video_id: str, max_attempts: int, now=None) -> bool:
+        attempt = self.get_transcript_attempt(video_id)
+        if not attempt:
+            return False
+        return transcript_retry_due(attempt, max_attempts, now or datetime.now(UTC))
+
+    def transcript_retry_ready(self, video_id: str, max_attempts: int, now=None) -> bool:
+        attempt = self.get_transcript_attempt(video_id)
+        return transcript_retry_due(attempt, max_attempts, now or datetime.now(UTC))
+
+    def record_transcript_success(self, video_id: str):
+        self.exec("delete from transcript_attempts where video_id=%s", [video_id])
+
+    def record_transcript_failure(self, video_id: str, error_type: str, retry_minutes: int, max_attempts: int):
+        existing = self.get_transcript_attempt(video_id)
+        attempt_count = int(existing["attempt_count"]) + 1 if existing else 1
+        now = datetime.now(UTC)
+        next_retry_at = next_retry_at_for_attempt(now, attempt_count, retry_minutes, max_attempts)
+        self.exec(
+            """
+            insert into transcript_attempts(video_id, last_attempt_at, attempt_count, last_error_type, next_retry_at)
+            values(%s, %s, %s, %s, %s)
+            on conflict(video_id) do update set
+              last_attempt_at = excluded.last_attempt_at,
+              attempt_count = excluded.attempt_count,
+              last_error_type = excluded.last_error_type,
+              next_retry_at = excluded.next_retry_at
+            """,
+            [video_id, now, attempt_count, error_type, next_retry_at],
+        )
+        return attempt_count, next_retry_at
+
+
+class GeminiSummarizer:
+    def __init__(self, api_key: str, model: str):
+        self.model = model
+        self.client = genai.Client(api_key=api_key)
+
+    def summarize_json(self, prompt: str, text: str):
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=[{"role": "user", "parts": [{"text": prompt + "\n\n" + text}]}],
+            config=gtypes.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema={
+                    "type": "object",
+                    "properties": {
+                        "is_blazers": {"type": "boolean"},
+                        "topic": {"type": "string"},
+                        "summary": {"type": "string"},
+                    },
+                    "required": ["is_blazers"],
+                },
+                thinking_config=gtypes.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        try:
+            return json.loads(response.text or "{}")
+        except Exception:
+            return {}
+
+
 def yt_channel_feed_url(channel_id: str) -> str:
     return f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
 
+
 def parse_youtube_video_id(entry) -> str | None:
-    """
-    Try multiple places to robustly extract a video ID from a YouTube channel RSS entry.
-    """
-    vid = entry.get("yt_videoid")
-    if vid:
-        return vid
-    eid = entry.get("id") or ""
-    m = re.search(r'[:/](?P<vid>[A-Za-z0-9_-]{6,})$', eid)
-    if m:
-        return m.group("vid")
+    video_id = entry.get("yt_videoid")
+    if video_id:
+        return video_id
+    entry_id = entry.get("id") or ""
+    match = re.search(r"[:/](?P<vid>[A-Za-z0-9_-]{6,})$", entry_id)
+    if match:
+        return match.group("vid")
     link = entry.get("link") or ""
-    m = re.search(r'[?&]v=([A-Za-z0-9_-]{6,})', link)
-    if m:
-        return m.group(1)
-    return None
+    match = re.search(r"[?&]v=([A-Za-z0-9_-]{6,})", link)
+    return match.group(1) if match else None
 
-def _parse_vtt_to_segments(vtt_text: str):
-    """
-    Very small VTT parser -> [(start, dur, text), ...]
-    Accepts HH:MM:SS.mmm or MM:SS.mmm; commas or dots for millis.
-    """
-    def _to_seconds(ts: str) -> float:
-        ts = ts.strip().replace(',', '.')
-        parts = ts.split(':')
-        if len(parts) == 3:
-            h, m, s = parts
-            return int(h) * 3600 + int(m) * 60 + float(s)
-        elif len(parts) == 2:
-            m, s = parts
-            return int(m) * 60 + float(s)
-        return float(ts)
 
-    segs = []
-    lines = [ln.rstrip('\r') for ln in vtt_text.splitlines()]
-    i = 0
-    while i < len(lines):
-        ln = lines[i].strip()
-        i += 1
-        if not ln or ln.upper().startswith('WEBVTT') or ln.startswith('NOTE'):
-            continue
-        # Optional cue id line (numeric or text); next should be timecode
-        time_line = ln
-        if '-->' not in time_line and i < len(lines):
-            time_line = lines[i].strip()
-            i += 1
-        if '-->' not in time_line:
-            continue
-        try:
-            start_s, end_s = [p.strip() for p in time_line.split('-->')[:2]]
-            start = _to_seconds(start_s)
-            end = _to_seconds(end_s)
-        except Exception:
-            continue
-        # collect cue text until blank line
-        texts = []
-        while i < len(lines) and lines[i].strip():
-            texts.append(lines[i].strip())
-            i += 1
-        # skip blank separator
-        while i < len(lines) and not lines[i].strip():
-            i += 1
-        cue = ' '.join(texts).strip()
-        if cue:
-            segs.append((start, max(0.0, end - start), cue))
-    return segs
-
-def _parse_json3_to_segments(json_text: str):
-    """
-    Parse YouTube 'json3' captions (srv3) => [(start, dur, text), ...]
-    """
-    data = json.loads(json_text)
-    segs = []
-    for ev in data.get('events', []):
-        seg_list = ev.get('segs')
-        if not seg_list:
-            continue
-        text = ''.join(seg.get('utf8', '') for seg in seg_list).strip()
-        if not text:
-            continue
-        start = float(ev.get('tStartMs', 0)) / 1000.0
-        dur = float(ev.get('dDurationMs', 0)) / 1000.0 if ev.get('dDurationMs') is not None else 0.0
-        segs.append((start, dur, text))
-    return segs
-
-def _fallback_transcript_via_ytdlp(video_id: str):
-    """
-    Fetch subtitles (manual or auto) using yt-dlp without downloading the video.
-    Prefer English and .vtt or json3 tracks.
-    """
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    # no download; quiet output
-    ydl_opts = {
-        'quiet': True,
-        'skip_download': True,
-        # No need to write files; we’ll fetch the caption URL ourselves
-    }
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-
-    # Both keys may exist; prefer authored subs over auto
-    tracks_by_lang = {}
-    subs = info.get('subtitles') or {}
-    autos = info.get('automatic_captions') or {}
-
-    for lang in ['en', 'en-US', 'en-GB']:
-        if lang in subs:
-            tracks_by_lang[lang] = subs[lang]
-        elif lang in autos:
-            tracks_by_lang[lang] = autos[lang]
-
-    if not tracks_by_lang:
-        raise NoTranscriptFound("yt-dlp: no English subtitles or auto-captions found")
-
-    # Choose one URL, preferring json3 or vtt
-    fmt_order = ['json3', 'vtt', 'ttml', 'srv3', 'srv2', 'srv1']
-    chosen = None
-    chosen_ext = None
-    for lang, lst in tracks_by_lang.items():
-        # Each item has {'ext': 'vtt'|'json3'|..., 'url': '...'}
-        lst_sorted = sorted(
-            lst,
-            key=lambda x: fmt_order.index(x.get('ext', 'vtt')) if x.get('ext') in fmt_order else 99
-        )
-        if lst_sorted:
-            chosen = lst_sorted[0].get('url')
-            chosen_ext = lst_sorted[0].get('ext')
-            break
-
-    if not chosen:
-        raise NoTranscriptFound("yt-dlp: could not choose a captions URL")
-
-    # Download the caption file itself (tiny)
-    with YoutubeDL({'quiet': True}) as ydl:
-        data = ydl.urlopen(chosen).read()
-
-    text = data.decode('utf-8', 'ignore')
-    if chosen_ext == 'json3':
-        segs = _parse_json3_to_segments(text)
-    else:
-        # treat vtt/ttml/srvN roughly as VTT; VTT works for most YouTube caption URLs
-        segs = _parse_vtt_to_segments(text)
-
-    if not segs:
-        raise NoTranscriptFound("yt-dlp: parsed 0 segments")
-
-    full_text = ' '.join(t for (_, _, t) in segs if t)
-    return full_text, segs
-
-def _parse_json3_to_segments(text: str):
-    try:
-        data = json.loads(text)
-    except Exception as e:
-        log("json3 parse error", e)
-        return []
-    segs = []
-    for ev in data.get("events", []):
-        seglist = ev.get("segs")
-        if not seglist:
-            continue
-        t = "".join(s.get("utf8", "") for s in seglist).strip()
-        if not t:
-            continue
-        start = float(ev.get("tStartMs", 0)) / 1000.0
-        dur = float(ev.get("dDurationMs", 0)) / 1000.0
-        segs.append((start, dur, t))
-    return segs
-
-def _parse_vtt_to_segments(text: str):
-    segs = []
-    # Split on blank lines (blocks)
-    for block in re.split(r"\n\n+", text.strip()):
-        lines = [ln for ln in block.strip().splitlines() if ln.strip()]
-        if not lines:
-            continue
-        if lines[0].strip().upper() == "WEBVTT":
-            # drop header line
-            lines = lines[1:]
-            if not lines:
-                continue
-        # find time line
-        time_line = None
-        for ln in lines:
-            if "-->" in ln:
-                time_line = ln
-                break
-        if not time_line:
-            continue
-        m = re.search(
-            r"(?P<start>\d+:\d{2}:\d{2}\.\d+|\d{1,2}:\d{2}\.\d+)\s*-->\s*(?P<end>\d+:\d{2}:\d{2}\.\d+|\d{1,2}:\d{2}\.\d+)",
-            time_line,
-        )
-        if not m:
-            continue
-        def _to_sec(s: str) -> float:
-            parts = s.split(":")
-            if len(parts) == 3:
-                h, m, sf = parts
-                return int(h) * 3600 + int(m) * 60 + float(sf)
-            m, sf = parts
-            return int(m) * 60 + float(sf)
-        start = _to_sec(m.group("start"))
-        end = _to_sec(m.group("end"))
-        # everything after the time line is text
-        start_idx = lines.index(time_line) + 1
-        txt = " ".join(lines[start_idx:]).strip()
-        if not txt:
-            continue
-        txt = re.sub(r"<[^>]+>", "", txt)      # remove tags
-        txt = re.sub(r"\s+", " ", txt).strip() # collapse spaces
-        segs.append((start, max(0.0, end - start), txt))
-    return segs
-
-def _fallback_transcript_via_ytdlp(video_id: str):
-    """
-    Fetch subtitles (manual or auto) using yt-dlp without downloading the video.
-    Prefer English and json3/vtt tracks. Uses Android client to reduce bot checks.
-    """
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    ydl_opts = {
-        "quiet": True,
-        "skip_download": True,
-        "sleep_requests": YTDLP_SLEEP_REQUESTS,
-        "extractor_args": {"youtube": {"player_client": YTDLP_EXTRACTOR_CLIENTS}},
-    }
-    if YTDLP_COOKIES:
-        ydl_opts["cookiefile"] = YTDLP_COOKIES
-        log("yt-dlp using cookies file", YTDLP_COOKIES)
-
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-
-    subs = info.get("subtitles") or {}
-    autos = info.get("automatic_captions") or {}
-    tracks_by_lang = {}
-    for lang in ("en", "en-US", "en-GB"):
-        if lang in subs:
-            tracks_by_lang[lang] = subs[lang]
-        elif lang in autos:
-            tracks_by_lang[lang] = autos[lang]
-    if not tracks_by_lang:
-        raise NoTranscriptFound("yt-dlp: no English subtitles or auto-captions found")
-
-    fmt_order = ["json3", "vtt", "ttml", "srv3", "srv2", "srv1"]
-    chosen_url, chosen_ext = None, None
-    for lang, lst in tracks_by_lang.items():
-        ranked = sorted(lst, key=lambda x: fmt_order.index(x.get("ext", "vtt")) if x.get("ext") in fmt_order else 99)
-        if ranked:
-            chosen_url = ranked[0].get("url")
-            chosen_ext = ranked[0].get("ext")
-            break
-    if not chosen_url:
-        raise NoTranscriptFound("yt-dlp: could not choose captions URL")
-
-    with YoutubeDL({"quiet": True}) as ydl:
-        data = ydl.urlopen(chosen_url).read()
-    body = data.decode("utf-8", "ignore")
-
-    if chosen_ext == "json3":
-        segs = _parse_json3_to_segments(body)
-    else:
-        segs = _parse_vtt_to_segments(body)
-    if not segs:
-        raise NoTranscriptFound("yt-dlp: parsed 0 segments")
-
-    full_text = " ".join(t for (_, _, t) in segs if t)
-    return full_text, segs
-
-def get_transcript_text(video_id: str) -> tuple[str, list]:
-    """
-    Primary: youtube-transcript-api (no API key).
-    Fallback: yt-dlp subtitles (Android client + small sleeps; optional cookies).
-    Returns (full_text, segments) or raises NoTranscriptFound / TranscriptsDisabled.
-    """
-    try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en", "en-US", "en-GB"])
-        segs = [
-            (float(t.get("start", 0.0)), float(t.get("duration", 0.0)), t.get("text", "").strip())
-            for t in transcript
-        ]
-        full_text = " ".join(s[2] for s in segs if s[2])
-        if full_text:
-            return full_text, segs
-    except (NoTranscriptFound, TranscriptsDisabled, CouldNotRetrieveTranscript) as e:
-        log("youtube-transcript-api says no transcript; trying yt-dlp fallback:", video_id, str(e))
-    except Exception as e:
-        # Handles cases like HTML responses or "no element found: line 1, column 0"
-        log("youtube-transcript-api failed; using yt-dlp fallback:", video_id, str(e))
-
-    # Fallback via yt-dlp (no video download)
-    return _fallback_transcript_via_ytdlp(video_id)
-
-def fmt_mmss(seconds: int) -> str:
-    m = seconds // 60
-    s = seconds % 60
-    return f"{int(m):02d}:{int(s):02d}"
-
-def clamp(text, limit=POST_CHAR_LIMIT):
-    if len(text) <= limit:
-        return text
-    return text[:limit-1] + "…"
-
-def first_keyword_hit(segs: list) -> tuple[int | None, str | None]:
-    """
-    Find first segment that contains any of the target keywords.
-    Returns (start_seconds, matched_text) or (None, None).
-    """
-    for (start, dur, text) in segs:
-        low = text.lower()
-        if any(k in low for k in KEYWORDS):
-            return int(math.floor(start)), text
-    return None, None
-
-# ---------------- Posting ----------------
-def create_thread(first_text, second_text):
-    payload = {"firstText": first_text, "secondText": second_text}
-    r = requests.post(
-        f"{WEB_BASE_URL}/post-thread",
-        headers={"Content-Type": "application/json", "X-Internal-Token": INTERNAL_API_TOKEN},
-        data=json.dumps(payload),
-        timeout=60,
-    )
-    if r.status_code != 200:
-        log("post-thread failed", r.status_code, r.text)
-    else:
-        log("posted thread ok")
-
-# ---------------- Dedupe ----------------
-def already_seen(feed_url, guid, media_id):
-    rows = db_exec(
-        "select 1 from seen_episodes "
-        "where feed_url=%s and coalesce(rss_guid,'')=coalesce(%s,'') and coalesce(spotify_episode_id,'')=coalesce(%s,'')",
-        [feed_url, guid, media_id],
-    )
-    return bool(rows)
-
-def mark_seen(feed_url, guid, media_id, published_at):
-    db_exec(
-        "insert into seen_episodes(feed_url, rss_guid, spotify_episode_id, published_at) "
-        "values(%s, %s, %s, %s) on conflict do nothing",
-        [feed_url, guid, media_id, published_at],
-    )
-
-# ---------------- Gemini ----------------
-# Per https://ai.google.dev/gemini-api/docs/api-key
-# The SDK will recognize GEMINI_API_KEY or GOOGLE_API_KEY, but we pass explicitly for clarity.
-GEMINI_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-if not GEMINI_KEY:
-    raise RuntimeError("Missing GOOGLE_API_KEY / GEMINI_API_KEY in environment for Gemini API.")
-# Pass explicitly (also recommended by docs if auto-discovery isn't working)
-ai = genai.Client(api_key=GEMINI_KEY)
-# Optional, non-secret log (no key content):
-log("Gemini API key detected via", "GOOGLE_API_KEY" if os.getenv("GOOGLE_API_KEY") else "GEMINI_API_KEY")
-
-def gemini_json(prompt, text):
-    resp = ai.models.generate_content(
-        model="gemini-2.5-flash-lite",
-        contents=[{"role": "user", "parts": [{"text": prompt + "\n\n" + text}]}],
-        config=gtypes.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema={
-                "type": "object",
-                "properties": {
-                    "is_blazers": {"type": "boolean"},
-                    "topic": {"type": "string"},
-                    "summary": {"type": "string"},
-                },
-                "required": ["is_blazers"],
-            },
-            thinking_config=gtypes.ThinkingConfig(thinking_budget=0),
-        ),
-    )
-    try:
-        return json.loads(resp.text or "{}")
-    except Exception:
-        return {}
-
-# ---------------- Core processing ----------------
 def parse_pubdate(entry):
-    # YouTube RSS typically has 'published' like "2025-08-22T17:11:00+00:00"
     if "published" in entry:
         try:
-            dt = dtparse.parse(entry["published"])
-            if not dt.tzinfo:
-                dt = dt.replace(tzinfo=UTC)
-            return dt.astimezone(UTC)
+            parsed = dtparse.parse(entry["published"])
+            if not parsed.tzinfo:
+                parsed = parsed.replace(tzinfo=UTC)
+            return parsed.astimezone(UTC)
         except Exception:
             pass
-    # Fallback: now
     return datetime.now(UTC)
 
-def process_channel(channel_id: str, mode: str):
-    feed_url = yt_channel_feed_url(channel_id)
-    try:
-        d = feedparser.parse(feed_url)
-        entries = list(d.entries)
-        dlog("feed:", feed_url, "entries:", len(entries))
 
-        if not entries:
-            dlog("feed has 0 entries:", feed_url)
-            return
+def build_rows(entries):
+    rows = []
+    for entry in entries:
+        video_id = parse_youtube_video_id(entry)
+        if video_id:
+            rows.append((parse_pubdate(entry), entry, video_id))
+    rows.sort(key=lambda item: item[0], reverse=True)
+    return rows
 
-        # Build (pub, entry, vid)
-        rows = []
-        for e in entries:
-            vid = parse_youtube_video_id(e)
-            if not vid:
-                dlog("skip entry: could not parse video id", e.get("id") or e.get("link"))
-                continue
-            pub = parse_pubdate(e)
-            rows.append((pub, e, vid))
 
-        if not rows:
-            dlog("no rows after parsing video ids")
-            return
+def create_thread(settings: WorkerSettings, first_text: str, second_text: str) -> bool:
+    if settings.dry_run:
+        log("DRY_RUN post 1:", first_text)
+        log("DRY_RUN post 2:", second_text)
+        return True
 
-        rows.sort(key=lambda t: t[0], reverse=True)
-        newest_pub = rows[0][0]
-        baseline = get_feed_baseline(feed_url)
-        dlog("baseline for", feed_url, "=", baseline.isoformat() if baseline else None)
-        dlog("newest_pub:", newest_pub.isoformat())
-
-        # First run: process only most recent
-        if baseline is None:
-            dlog("first run for feed; newest entry will be processed once")
-            pub, entry, vid = rows[0]
-            handle_video(feed_url, mode, entry, vid)
-            set_feed_baseline(feed_url, pub)
-            return
-
-        # Subsequent: strictly newer than baseline, oldest→newest
-        to_process = [(p, e, v) for (p, e, v) in rows if p > baseline]
-        to_process.sort(key=lambda t: t[0])
-        dlog("to_process count:", len(to_process))
-        if not to_process:
-            dlog("no items newer than baseline for feed:", feed_url)
-
-        for pub, entry, vid in to_process[:8]:  # safety cap
-            handle_video(feed_url, mode, entry, vid)
-
-        if newest_pub > baseline:
-            set_feed_baseline(feed_url, newest_pub)
-
-    except Exception as e:
-        log("channel error", channel_id, e)
-
-def handle_video(feed_url: str, mode: str, entry, video_id: str):
-    guid = entry.get("id") or entry.get("link") or video_id
-    pub = parse_pubdate(entry)
-    title = (entry.get("title") or "").strip()
-
-    if already_seen(feed_url, guid, video_id):
-        dlog("skip: already_seen", guid)
-        return
-
-    try:
-        full_text, segs = get_transcript_text(video_id)
-    except (NoTranscriptFound, TranscriptsDisabled, CouldNotRetrieveTranscript) as e:
-        log("no transcript", video_id, e)
-        mark_seen(feed_url, guid, video_id, pub)
-        return
-    except Exception as e:
-        log("transcript error", video_id, e)
-        return  # don't mark seen if we had a transient error
-
-    # find first keyword hit to get a timestamp + local snippet
-    start_sec, matched_text = first_keyword_hit(segs)
-    if start_sec is None:
-        dlog("no direct keyword hit in transcript; mode=", mode)
-        # No direct keyword hit — allow Gemini for "blazers" feeds, stricter for "national"
-        if mode == "national":
-            mark_seen(feed_url, guid, video_id, pub)
-            return
-        snippet = full_text[:4000]
-        jump = 0
-    else:
-        window_end = start_sec + 180  # ~3 minutes after
-        window_texts = [t for (s, dur, t) in segs if s >= start_sec and s <= window_end]
-        snippet = " ".join(window_texts)[:8000]
-        jump = start_sec
-
-    # Ask Gemini to judge & summarize (strict Blazers context)
-    prompt = (
-        "You will be given a snippet from a podcast transcript. "
-        "Decide if it is about the NBA team the Portland Trail Blazers (players, coaches, front office). "
-        "Exclude any generic 'trailblazer' usages not about the NBA team. "
-        f"{EXCLUDE_NOTE}\n\n"
-        "Return JSON with fields: is_blazers (boolean), topic (short string), summary (<=300 chars, neutral tone)."
+    response = requests.post(
+        f"{settings.web_base_url}/post-thread",
+        headers={"Content-Type": "application/json", "X-Internal-Token": settings.internal_api_token},
+        data=json.dumps({"firstText": first_text, "secondText": second_text}),
+        timeout=60,
     )
-    out = gemini_json(prompt, snippet)
-    if not out.get("is_blazers"):
-        dlog("gemini says not blazers; marking seen", video_id)
-        mark_seen(feed_url, guid, video_id, pub)
+    if response.status_code != 200:
+        log("post-thread failed", response.status_code, response.text)
+        return False
+    log("posted thread ok")
+    return True
+
+
+def maybe_mark_seen(settings: WorkerSettings, db: Database, feed_url, guid, media_id, published_at):
+    if settings.dry_run:
+        return
+    db.mark_seen(feed_url, guid, media_id, published_at)
+
+
+def build_summary_prompt(exclude_note: str) -> str:
+    return (
+        "You will be given a snippet from a podcast transcript. "
+        "Decide if it is about the NBA team the Portland Trail Blazers, including players, coaches, "
+        "front office, ownership, draft, trades, injuries, or season context. "
+        "Exclude any generic 'trailblazer' usages not about the NBA team. "
+        f"{exclude_note}\n\n"
+        "Return JSON with fields: is_blazers (boolean), topic (short string), "
+        "summary (<=300 chars, neutral tone)."
+    )
+
+
+def handle_video(
+    settings: WorkerSettings,
+    db: Database,
+    summarizer: GeminiSummarizer,
+    config: dict,
+    transcript_settings,
+    feed_url: str,
+    mode: str,
+    entry,
+    video_id: str,
+) -> bool:
+    guid = entry.get("id") or entry.get("link") or video_id
+    published_at = parse_pubdate(entry)
+    title = (entry.get("title") or "").strip()
+    keywords = [keyword.lower() for keyword in config.get("keywords_positive", [])]
+    post_char_limit = int(config.get("post_char_limit", 300))
+
+    if db.already_seen(feed_url, guid, video_id):
+        dlog(settings, "skip: already seen", video_id)
+        return True
+    if not db.transcript_retry_ready(video_id, settings.transcript_max_attempts):
+        dlog(settings, "skip: transcript retry not due", video_id)
+        return True
+
+    try:
+        result = fetch_transcript(video_id, transcript_settings, log=log)
+        if not settings.dry_run:
+            db.record_transcript_success(video_id)
+    except TranscriptError as exc:
+        if exc.transient:
+            log("transient transcript failure", video_id, exc.error_type)
+            if not settings.dry_run:
+                attempts, retry_at = db.record_transcript_failure(
+                    video_id,
+                    exc.error_type,
+                    settings.transcript_retry_minutes,
+                    settings.transcript_max_attempts,
+                )
+                log("transcript retry scheduled", video_id, "attempts", attempts, "next", retry_at)
+            return True
+        log("permanent transcript failure", video_id, exc.error_type)
+        maybe_mark_seen(settings, db, feed_url, guid, video_id, published_at)
+        return True
+
+    start_seconds, _matched_text = first_keyword_hit(result.segments, keywords)
+    if start_seconds is None:
+        dlog(settings, "no direct keyword hit", video_id, mode)
+        if mode == "national":
+            maybe_mark_seen(settings, db, feed_url, guid, video_id, published_at)
+            return True
+        snippet = result.full_text[:4000]
+        jump_seconds = 0
+    else:
+        snippet = transcript_window(result.segments, start_seconds, window_seconds=180, char_limit=8000)
+        jump_seconds = start_seconds
+
+    output = summarizer.summarize_json(build_summary_prompt(config.get("exclude_note", "")), snippet)
+    if not output.get("is_blazers"):
+        dlog(settings, "gemini says not blazers", video_id)
+        maybe_mark_seen(settings, db, feed_url, guid, video_id, published_at)
+        return True
+
+    topic = (output.get("topic") or "Blazers").strip()
+    link = youtube_link(video_id, jump_seconds)
+    time_text = fmt_mmss(jump_seconds) if jump_seconds > 0 else ""
+    title_part = title or "New podcast episode"
+    first_text = f"{title_part}{' - ' + time_text if time_text else ''} {topic} {link}"
+    second_text = (output.get("summary") or "").strip()
+
+    posted = create_thread(
+        settings,
+        clamp_text(first_text, post_char_limit),
+        clamp_text(second_text, post_char_limit),
+    )
+    if not posted:
+        return False
+
+    maybe_mark_seen(settings, db, feed_url, guid, video_id, published_at)
+    return True
+
+
+def process_channel(
+    settings: WorkerSettings,
+    db: Database,
+    summarizer: GeminiSummarizer,
+    config: dict,
+    transcript_settings,
+    channel_id: str,
+    mode: str,
+):
+    feed_url = yt_channel_feed_url(channel_id)
+    parsed = feedparser.parse(feed_url)
+    entries = list(parsed.entries)
+    dlog(settings, "feed", feed_url, "entries", len(entries))
+    if not entries:
         return
 
-    topic = (out.get("topic") or "Blazers").strip()
-    link = f"https://www.youtube.com/watch?v={video_id}"
-    if jump > 0:
-        link += f"&t={int(jump)}s"
+    rows = build_rows(entries)
+    if not rows:
+        dlog(settings, "feed has no parseable video ids", feed_url)
+        return
 
-    time_txt = fmt_mmss(jump) if jump > 0 else ""
-    first = clamp(f"{title}{' — ' + time_txt if time_txt else ''} {topic} {link}", POST_CHAR_LIMIT)
-    second = clamp((out.get("summary", "") or "").strip(), POST_CHAR_LIMIT)
+    newest_pub = rows[0][0]
+    baseline = db.get_feed_baseline(feed_url)
+    if baseline is None:
+        candidates = [rows[0]]
+    else:
+        new_rows = [(pub, entry, video_id) for pub, entry, video_id in rows if pub > baseline]
+        due_retries = [
+            (pub, entry, video_id)
+            for pub, entry, video_id in rows
+            if pub <= baseline and db.has_due_transcript_retry(video_id, settings.transcript_max_attempts)
+        ]
+        candidates = due_retries + sorted(new_rows, key=lambda item: item[0])
 
-    create_thread(first, second)
-    mark_seen(feed_url, guid, video_id, pub)
+    dlog(settings, "candidates", len(candidates), "baseline", baseline.isoformat() if baseline else None)
+    all_posting_ok = True
+    for published_at, entry, video_id in candidates[:8]:
+        ok = handle_video(settings, db, summarizer, config, transcript_settings, feed_url, mode, entry, video_id)
+        all_posting_ok = all_posting_ok and ok
 
-# ---------------- Loop ----------------
+    if not settings.dry_run and all_posting_ok and (baseline is None or newest_pub > baseline):
+        db.set_feed_baseline(feed_url, newest_pub)
+
+
+def poll_once(settings: WorkerSettings, db: Database, summarizer: GeminiSummarizer, config: dict, transcript_settings):
+    log("polling...")
+    for feed in config.get("national_feeds", []):
+        channel_id = feed.get("youtube_channel_id")
+        if not channel_id:
+            log("skip national feed without youtube_channel_id", feed.get("youtube_search") or feed.get("rss"))
+            continue
+        process_channel(settings, db, summarizer, config, transcript_settings, channel_id, "national")
+        time.sleep(settings.scan_pause_seconds)
+
+    for feed in config.get("blazers_feeds", []):
+        channel_id = feed.get("youtube_channel_id")
+        if not channel_id:
+            log("skip blazers feed without youtube_channel_id", feed.get("youtube_search") or feed.get("rss"))
+            continue
+        process_channel(settings, db, summarizer, config, transcript_settings, channel_id, "blazers")
+        time.sleep(settings.scan_pause_seconds)
+
+
 def loop():
-    global FORCE_ONE_SHOT
-    if FORCE_ONE_SHOT:
-        dlog("FORCE_ONE_SHOT enabled: will process the newest item once, then disable")
+    settings = WorkerSettings.from_env()
+    config = load_config(settings)
+    transcript_settings = settings_from_env()
+    db = Database(settings.db_url)
+    db.ensure_schema()
+    summarizer = GeminiSummarizer(settings.gemini_key, settings.gemini_model)
+    log("Gemini model", settings.gemini_model)
+    if settings.dry_run:
+        log("DRY_RUN enabled: posts and episode state will not be written")
 
     while True:
-        log("polling…")
+        poll_once(settings, db, summarizer, config, transcript_settings)
+        if settings.force_one_shot:
+            log("FORCE_ONE_SHOT complete")
+            return
+        log("sleep", settings.poll_interval_seconds, "s")
+        time.sleep(settings.poll_interval_seconds)
 
-        # National shows
-        for f in CONFIG.get("national_feeds", []):
-            cid = f.get("youtube_channel_id")
-            if not cid:
-                log("skip (no youtube_channel_id)", f.get("youtube_search") or f.get("rss"))
-                continue
-            process_channel(cid, "national")
-            time.sleep(SCAN_PAUSE_SECONDS)
-
-        # Blazers-specific shows
-        for f in CONFIG.get("blazers_feeds", []):
-            cid = f.get("youtube_channel_id")
-            if not cid:
-                log("skip (no youtube_channel_id)", f.get("youtube_search") or f.get("rss"))
-                continue
-            process_channel(cid, "blazers")
-            time.sleep(SCAN_PAUSE_SECONDS)
-
-        # Turn off FORCE_ONE_SHOT after the first loop to avoid repeat posting
-        if FORCE_ONE_SHOT:
-            FORCE_ONE_SHOT = False
-            dlog("FORCE_ONE_SHOT completed; set to False")
-
-        log("sleep", POLL_INTERVAL_SECONDS, "s")
-        time.sleep(POLL_INTERVAL_SECONDS)
 
 if __name__ == "__main__":
     loop()
