@@ -2,54 +2,88 @@
 
 Two-service Railway app:
 
-- **web/** (Node): Bluesky OAuth (confidential client) + `/post-thread` API using @atproto OAuth + Agent.
-- **worker/** (Python): Polls RSS, transcribes with faster-whisper, uses Gemini 2.5 Flash-Lite, calls web to post.
+- **web/** (Node): Bluesky OAuth confidential client plus the internal `/post-thread` posting API.
+- **worker/** (Python): polls YouTube channel RSS, fetches captions/transcripts without downloading media, summarizes with Gemini, and asks `web` to post.
 
 ## One-time setup
-See the step-by-step in our conversation notes. In short:
-1) Host OAuth client metadata & JWKS on GitHub Pages (`/docs`).
-2) Deploy **web** and complete Bluesky OAuth sign-in once.
-3) Deploy **worker** with Spotify + Gemini credentials.
+
+1. Host OAuth client metadata and JWKS from `docs/` on GitHub Pages.
+2. Deploy **web** and complete Bluesky OAuth sign-in once.
+3. Deploy **worker** with Gemini credentials and the same internal token as `web`.
 
 ## Behavior
-- The worker **always looks at the latest episodes**:
-  - On the very first run, it processes **the single most recent episode per feed** and sets a **baseline** for that feed.
-  - On subsequent runs, it processes **only episodes newer than that baseline** (no backlog), regardless of calendar date.
-- Dedupe: tracked by RSS `guid` and Spotify episode ID in Postgres.
+
+- The worker uses `config/feeds.youtube.yaml` by default.
+- On first run for each feed, it processes only the newest video and stores a baseline.
+- On later runs, it processes videos newer than the baseline plus any due transcript retries still visible in the channel RSS feed.
+- Transcript provider order is:
+  1. `youtube-transcript-api`
+  2. `yt-dlp` caption-only fallback (`skip_download=True`)
+  3. Optional SwiftShadow free-proxy retry when `TRANSCRIPT_PROXY_ENABLED=1`
+- No audio or video files are downloaded.
+- Dedupe is tracked by RSS `guid` and YouTube video ID in Postgres.
 
 ### Posting logic
-- **National NBA podcasts**: If a Blazers mention is detected:
-  1) Post 1: Spotify episode link **with (MM:SS)** of the Blazers segment + a short topic (≤300 chars)
-  2) Post 2: ≤300-char neutral summary of that segment
-- **Blazers-specific podcasts**:
-  1) Post 1: Spotify episode link
-  2) Post 2: ≤300-char neutral episode summary
 
-### Formatting & constraints
-- Neutral tone, **no emojis**, no hashtags.
-- Link facets are applied automatically; replies use `reply.root`/`reply.parent` to form a thread.
-- Max **300 characters** per post.
+- **National NBA podcasts**: post only when a Blazers mention is detected.
+  1. Post 1: YouTube episode link with timestamp and short topic, max 300 chars.
+  2. Post 2: neutral segment summary, max 300 chars.
+- **Blazers-specific podcasts**: summarize the newest episode.
+  1. Post 1: YouTube episode link and short topic, max 300 chars.
+  2. Post 2: neutral episode summary, max 300 chars.
+
+### Formatting and constraints
+
+- Neutral tone, no emojis, no hashtags.
+- Link facets are applied by `web`; replies use `reply.root` and `reply.parent` to form a thread.
+- `web` enforces Bluesky's 300 grapheme post limit before posting.
 
 ## Environment (Railway)
+
 **Web**:
+
 - `DATABASE_URL`
-- `CLIENT_METADATA_URL` = `https://chriswilliamspdx.github.io/blazersroundup/bsky-client.json`
-- `BSKY_OAUTH_PRIVATE_KEY_PEM` = (PEM from `scripts/generate-jwk.mjs`)
-- `BSKY_OAUTH_KID` = (kid from `scripts/generate-jwk.mjs`)
-- `INTERNAL_API_TOKEN` = (random string)
+- `CLIENT_METADATA_URL` = `https://chriswilliamspdx.github.io/blazersroundup/bsky-client-v2.json`
+- `BSKY_OAUTH_PRIVATE_KEY_JWK` = private JWK from `scripts/generate-jwk.mjs`
+- `BSKY_OAUTH_KID` = kid from `scripts/generate-jwk.mjs`
+- `INTERNAL_API_TOKEN` = random shared secret
 - `BSKY_EXPECTED_HANDLE` = `@blazersroundup.bsky.social`
+- `WEB_BASE_URL` = public Railway URL for the web service
 - `PORT` = 8080 (optional)
+- `POST_CHAR_LIMIT` = 300 (optional)
 
 **Worker**:
+
 - `DATABASE_URL`
 - `WEB_BASE_URL` = `https://<your-web>.up.railway.app`
-- `INTERNAL_API_TOKEN` = (same as web)
-- `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET`
+- `INTERNAL_API_TOKEN` = same value as web
 - `GEMINI_API_KEY`
-- `POLL_INTERVAL_SECONDS` = 600
-- `TIMEZONE` = `America/Los_Angeles`
-- `WHISPER_MODEL` = `small-int8`
+- `GEMINI_MODEL` = `gemini-2.5-flash-lite` (optional default)
+- `POLL_INTERVAL_SECONDS` = 600 (optional)
+- `TIMEZONE` = `America/Los_Angeles` (optional)
+- `DRY_RUN` = 1 to log planned posts without posting or marking episodes seen
+- `TRANSCRIPT_RETRY_MINUTES` = 60 (optional)
+- `TRANSCRIPT_MAX_ATTEMPTS` = 5 (optional)
+- `TRANSCRIPT_PROXY_ENABLED` = 0 or 1 (optional)
+- `SWIFTSHADOW_COUNTRIES` = `US` (optional)
+- `YTDLP_COOKIES` = optional path to cookies file
+
+## Local checks
+
+- Validate configured YouTube feeds without posting:
+
+  ```bash
+  python tools/validate_youtube_feeds.py config/feeds.youtube.yaml
+  ```
+
+- Run unit tests:
+
+  ```bash
+  python -m unittest discover -s tests
+  node --test tests/postText.test.mjs
+  ```
 
 ## Notes
-- Per-feed **baseline** prevents backlog spam and is independent of calendar day.
-- If a feed republishes an episode with an older timestamp, dedupe by GUID/Spotify ID still prevents reposts.
+
+- Free public proxies are best-effort only. Missed transcript access should be retried later, not treated as guaranteed infrastructure.
+- Keep the worker transcript-only. Reintroducing audio download will bring back the bandwidth problem this rebuild is avoiding.
