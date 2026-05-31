@@ -16,7 +16,7 @@ from google.genai import types as gtypes
 from psycopg2.extras import RealDictCursor
 
 from retry import next_retry_at_for_attempt, transcript_retry_due
-from text_utils import clamp_text, first_keyword_hit, fmt_mmss, transcript_window, youtube_link
+from text_utils import build_model_input, clamp_text, first_keyword_hit, fmt_mmss, transcript_window, youtube_link
 from transcript_providers import TranscriptError, fetch_transcript, settings_from_env
 
 
@@ -316,10 +316,12 @@ def maybe_mark_seen(settings: WorkerSettings, db: Database, feed_url, guid, medi
 
 def build_summary_prompt(exclude_note: str) -> str:
     return (
-        "You will be given a snippet from a podcast transcript. "
+        "You will be given podcast metadata and a snippet from a transcript. "
         "Decide if it is about the NBA team the Portland Trail Blazers, including players, coaches, "
         "front office, ownership, draft, trades, injuries, or season context. "
         "Exclude any generic 'trailblazer' usages not about the NBA team. "
+        "Use the title as context, but do not say an episode is about the Blazers unless the title or transcript "
+        "supports that conclusion. "
         f"{exclude_note}\n\n"
         "Return JSON with fields: is_blazers (boolean), topic (short string), "
         "summary (<=300 chars, neutral tone)."
@@ -382,7 +384,8 @@ def handle_video(
         snippet = transcript_window(result.segments, start_seconds, window_seconds=180, char_limit=8000)
         jump_seconds = start_seconds
 
-    output = summarizer.summarize_json(build_summary_prompt(config.get("exclude_note", "")), snippet)
+    model_input = build_model_input(mode, title, video_id, start_seconds is not None, snippet)
+    output = summarizer.summarize_json(build_summary_prompt(config.get("exclude_note", "")), model_input)
     if not output.get("is_blazers"):
         dlog(settings, "gemini says not blazers", video_id)
         maybe_mark_seen(settings, db, feed_url, guid, video_id, published_at)
