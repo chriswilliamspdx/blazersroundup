@@ -41,6 +41,17 @@ def transcript_window(
     return normalize_spaces(text)[:char_limit]
 
 
+def build_model_input(mode: str, title: str, video_id: str, direct_keyword_hit: bool, transcript_text: str) -> str:
+    return (
+        f"Feed type: {mode}\n"
+        f"Episode title: {title or 'Untitled'}\n"
+        f"YouTube video ID: {video_id}\n"
+        f"Direct keyword hit in transcript: {'yes' if direct_keyword_hit else 'no'}\n\n"
+        "Transcript snippet:\n"
+        f"{transcript_text}"
+    )
+
+
 def youtube_link(video_id: str, start_seconds: int = 0) -> str:
     link = f"https://www.youtube.com/watch?v={video_id}"
     if start_seconds > 0:
