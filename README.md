@@ -63,6 +63,7 @@ Two-service Railway app:
 - `TIMEZONE` = `America/Los_Angeles` (optional)
 - `DRY_RUN` = 1 to log planned posts without posting or marking episodes seen
 - `DRY_RUN_RECORD_TRANSCRIPT_RETRIES` = 1 to still back off blocked transcripts during dry-run
+- `FORCE_TRANSCRIPT_RETRY` = 1 to ignore saved transcript cooldowns for one test run
 - `FEED_MODE` = `all`, `national`, or `blazers` (optional, use `blazers` while testing)
 - `MAX_VIDEOS_PER_FEED` = 2 (optional, lower to 1 while testing)
 - `MAX_VIDEOS_PER_POLL` = 40 (optional, lower to 5-10 while testing)
