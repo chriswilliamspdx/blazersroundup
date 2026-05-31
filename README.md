@@ -73,6 +73,10 @@ Two-service Railway app:
 - `TRANSCRIPT_PROXY_ENABLED` = 0 or 1 (optional)
 - `SWIFTSHADOW_COUNTRIES` = `US` (optional)
 - `YTDLP_COOKIES` = optional path to cookies file
+- `YTDLP_COOKIES_TEXT` = optional private Railway variable containing a Netscape-format cookies file
+- `YTDLP_COOKIES_B64` = optional base64 version of `YTDLP_COOKIES_TEXT`
+
+Use a dedicated YouTube account for cookies, not your primary personal account.
 
 ## Local checks
 
