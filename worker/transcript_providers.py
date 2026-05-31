@@ -230,13 +230,21 @@ def _swiftshadow_proxy_factory(countries: list[str] | None) -> Callable[[], str]
     return next_proxy
 
 
+def env_first(*names: str) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return None
+
+
 def cookiefile_from_env() -> str | None:
-    cookie_path = os.getenv("YTDLP_COOKIES")
+    cookie_path = env_first("YTDLP_COOKIES", "ytdlp_cookies")
     if cookie_path:
         return cookie_path
 
-    cookie_text = os.getenv("YTDLP_COOKIES_TEXT")
-    cookie_b64 = os.getenv("YTDLP_COOKIES_B64")
+    cookie_text = env_first("YTDLP_COOKIES_TEXT", "ytdlp_cookies_text")
+    cookie_b64 = env_first("YTDLP_COOKIES_B64", "ytdlp_cookies_b64")
     if cookie_b64 and not cookie_text:
         cookie_text = base64.b64decode(cookie_b64).decode("utf-8")
     if not cookie_text:
