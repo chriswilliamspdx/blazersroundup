@@ -44,10 +44,13 @@ class WorkerSettings:
     timezone: str
     debug: bool
     dry_run: bool
+    dry_run_record_transcript_retries: bool
     force_one_shot: bool
     scan_pause_seconds: float
     transcript_retry_minutes: int
     transcript_max_attempts: int
+    max_videos_per_feed: int
+    max_videos_per_poll: int
 
     @classmethod
     def from_env(cls):
@@ -65,10 +68,13 @@ class WorkerSettings:
             timezone=os.getenv("TIMEZONE", "America/Los_Angeles"),
             debug=os.getenv("DEBUG", "0") == "1",
             dry_run=os.getenv("DRY_RUN", "0") == "1",
+            dry_run_record_transcript_retries=os.getenv("DRY_RUN_RECORD_TRANSCRIPT_RETRIES", "1") == "1",
             force_one_shot=os.getenv("FORCE_ONE_SHOT", "0") == "1",
-            scan_pause_seconds=float(os.getenv("SCAN_PAUSE_SECONDS", "0.7")),
+            scan_pause_seconds=float(os.getenv("SCAN_PAUSE_SECONDS", "2.0")),
             transcript_retry_minutes=int(os.getenv("TRANSCRIPT_RETRY_MINUTES", "60")),
             transcript_max_attempts=int(os.getenv("TRANSCRIPT_MAX_ATTEMPTS", "5")),
+            max_videos_per_feed=int(os.getenv("MAX_VIDEOS_PER_FEED", "2")),
+            max_videos_per_poll=int(os.getenv("MAX_VIDEOS_PER_POLL", "40")),
         )
 
 
@@ -349,7 +355,7 @@ def handle_video(
     except TranscriptError as exc:
         if exc.transient:
             log("transient transcript failure", video_id, exc.error_type)
-            if not settings.dry_run:
+            if not settings.dry_run or settings.dry_run_record_transcript_retries:
                 attempts, retry_at = db.record_transcript_failure(
                     video_id,
                     exc.error_type,
@@ -435,30 +441,40 @@ def process_channel(
 
     dlog(settings, "candidates", len(candidates), "baseline", baseline.isoformat() if baseline else None)
     all_posting_ok = True
-    for published_at, entry, video_id in candidates[:8]:
+    processed = 0
+    for published_at, entry, video_id in candidates[: settings.max_videos_per_feed]:
         ok = handle_video(settings, db, summarizer, config, transcript_settings, feed_url, mode, entry, video_id)
         all_posting_ok = all_posting_ok and ok
+        processed += 1
 
     if not settings.dry_run and all_posting_ok and (baseline is None or newest_pub > baseline):
         db.set_feed_baseline(feed_url, newest_pub)
+    return processed
 
 
 def poll_once(settings: WorkerSettings, db: Database, summarizer: GeminiSummarizer, config: dict, transcript_settings):
     log("polling...")
+    remaining = settings.max_videos_per_poll
     for feed in config.get("national_feeds", []):
+        if remaining <= 0:
+            log("poll video budget reached")
+            return
         channel_id = feed.get("youtube_channel_id")
         if not channel_id:
             log("skip national feed without youtube_channel_id", feed.get("youtube_search") or feed.get("rss"))
             continue
-        process_channel(settings, db, summarizer, config, transcript_settings, channel_id, "national")
+        remaining -= process_channel(settings, db, summarizer, config, transcript_settings, channel_id, "national") or 0
         time.sleep(settings.scan_pause_seconds)
 
     for feed in config.get("blazers_feeds", []):
+        if remaining <= 0:
+            log("poll video budget reached")
+            return
         channel_id = feed.get("youtube_channel_id")
         if not channel_id:
             log("skip blazers feed without youtube_channel_id", feed.get("youtube_search") or feed.get("rss"))
             continue
-        process_channel(settings, db, summarizer, config, transcript_settings, channel_id, "blazers")
+        remaining -= process_channel(settings, db, summarizer, config, transcript_settings, channel_id, "blazers") or 0
         time.sleep(settings.scan_pause_seconds)
 
 
