@@ -62,6 +62,10 @@ Two-service Railway app:
 - `POLL_INTERVAL_SECONDS` = 600 (optional)
 - `TIMEZONE` = `America/Los_Angeles` (optional)
 - `DRY_RUN` = 1 to log planned posts without posting or marking episodes seen
+- `DRY_RUN_RECORD_TRANSCRIPT_RETRIES` = 1 to still back off blocked transcripts during dry-run
+- `MAX_VIDEOS_PER_FEED` = 2 (optional, lower to 1 while testing)
+- `MAX_VIDEOS_PER_POLL` = 40 (optional, lower to 5-10 while testing)
+- `SCAN_PAUSE_SECONDS` = 2.0 (optional, increase to slow requests)
 - `TRANSCRIPT_RETRY_MINUTES` = 60 (optional)
 - `TRANSCRIPT_MAX_ATTEMPTS` = 5 (optional)
 - `TRANSCRIPT_PROXY_ENABLED` = 0 or 1 (optional)
