@@ -18,6 +18,7 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - The worker uses `config/feeds.youtube.yaml` by default.
 - On first run for each feed, it processes only the newest video and stores a baseline.
 - On later runs, it processes videos newer than the baseline plus any due transcript retries still visible in the channel RSS feed.
+- Transcript failures do not advance the feed baseline; the episode stays eligible for a later retry.
 - Transcript provider order is:
   1. `youtube-transcript-api`
   2. `yt-dlp` caption-only fallback (`skip_download=True`)
