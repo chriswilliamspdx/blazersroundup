@@ -78,7 +78,13 @@ const sessionStore = {
   },
 };
 
-const keyJwk = JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK);
+const keyJwk = {
+  ...JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK),
+  kid: BSKY_OAUTH_KID,
+  alg: 'ES256',
+  key_ops: ['sign'],
+};
+delete keyJwk.use;
 const signingKey = await JoseKey.fromImportable(keyJwk, BSKY_OAUTH_KID);
 
 const clientMetadataResponse = await fetch(CLIENT_METADATA_URL);
