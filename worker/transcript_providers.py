@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -32,6 +33,7 @@ except ModuleNotFoundError as exc:
 
 LANGUAGE_PRIORITY = ["en", "en-US", "en-GB"]
 CAPTION_FORMAT_PRIORITY = ["json3", "vtt"]
+COOKIE_FILE_PATH = "/tmp/ytdlp-cookies.txt"
 
 
 @dataclass
@@ -228,6 +230,25 @@ def _swiftshadow_proxy_factory(countries: list[str] | None) -> Callable[[], str]
     return next_proxy
 
 
+def cookiefile_from_env() -> str | None:
+    cookie_path = os.getenv("YTDLP_COOKIES")
+    if cookie_path:
+        return cookie_path
+
+    cookie_text = os.getenv("YTDLP_COOKIES_TEXT")
+    cookie_b64 = os.getenv("YTDLP_COOKIES_B64")
+    if cookie_b64 and not cookie_text:
+        cookie_text = base64.b64decode(cookie_b64).decode("utf-8")
+    if not cookie_text:
+        return None
+
+    os.makedirs(os.path.dirname(COOKIE_FILE_PATH), exist_ok=True)
+    with open(COOKIE_FILE_PATH, "w", encoding="utf-8") as file:
+        file.write(cookie_text.strip() + "\n")
+    os.chmod(COOKIE_FILE_PATH, 0o600)
+    return COOKIE_FILE_PATH
+
+
 def fetch_transcript(video_id: str, settings: TranscriptSettings, log: Callable[..., None] = print) -> TranscriptResult:
     errors: list[TranscriptError] = []
 
@@ -284,7 +305,7 @@ def settings_from_env() -> TranscriptSettings:
         proxy_enabled=os.getenv("TRANSCRIPT_PROXY_ENABLED", "0") == "1",
         swiftshadow_countries=countries or ["US"],
         proxy_attempts=int(os.getenv("TRANSCRIPT_PROXY_ATTEMPTS", "2")),
-        ytdlp_cookies=os.getenv("YTDLP_COOKIES") or None,
+        ytdlp_cookies=cookiefile_from_env(),
         ytdlp_extractor_clients=clients or ["android", "web"],
         ytdlp_sleep_requests=float(os.getenv("YTDLP_SLEEP_REQUESTS", "1.0")),
     )
