@@ -52,7 +52,8 @@ import('jose').then(async ({ exportJWK, exportPKCS8 }) => {
     x,
     y,
     d: privJwk.d,        // secret
-    use: 'sig',
+    alg: 'ES256',
+    key_ops: ['sign'],
     kid
   };
   const PUBLIC_JWK = {
@@ -60,7 +61,8 @@ import('jose').then(async ({ exportJWK, exportPKCS8 }) => {
     crv: 'P-256',
     x,
     y,
-    use: 'sig',
+    alg: 'ES256',
+    key_ops: ['verify'],
     kid
   };
   const privPem = await exportPKCS8(privateKey);

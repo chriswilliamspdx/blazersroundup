@@ -39,8 +39,8 @@ const toPem = (derBuf, label) => {
     y: pubJwk.y,
     d: privJwk.d,
     kid,
-    use: 'sig',
-    alg: 'ES256'
+    alg: 'ES256',
+    key_ops: ['sign']
   };
   const publicJwkOut = {
     kty: 'EC',
@@ -48,8 +48,8 @@ const toPem = (derBuf, label) => {
     x: pubJwk.x,
     y: pubJwk.y,
     kid,
-    use: 'sig',
-    alg: 'ES256'
+    alg: 'ES256',
+    key_ops: ['verify']
   };
   const jwksOut = { keys: [publicJwkOut] };
 

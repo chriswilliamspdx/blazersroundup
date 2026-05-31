@@ -5,7 +5,8 @@
       "crv": "P-256",
       "x": "g9-0A8wvXx2zvgFpDijBVkxXqZzpmtwFW7D_gGdHMoU",
       "y": "RHCTDGqm6JLgiaB2X3cbyJypBuz_FLwD9WRx08-W5N0",
-      "use": "sig",
+      "alg": "ES256",
+      "key_ops": ["verify"],
       "kid": "1759a7b9-7888-42a3-a4a5-137310ca1bdb"
     }
   ]
