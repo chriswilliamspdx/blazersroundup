@@ -125,9 +125,19 @@ const postCharLimit = Number.parseInt(POST_CHAR_LIMIT, 10) || 300;
 
 app.get('/', (_req, res) => res.type('text/plain').send('ok'));
 
-app.get('/session/debug', async (_req, res) => {
-  const row = await pg.query(`SELECT sub, session_json, updated_at FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
-  res.json({ haveSession: row.rowCount > 0, session: row.rows[0] || null });
+async function sessionStatus() {
+  const row = await pg.query(`SELECT sub, updated_at FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
+  return { haveSession: row.rowCount > 0, session: row.rows[0] || null };
+}
+
+app.get('/session/status', async (_req, res) => {
+  res.json(await sessionStatus());
+});
+
+app.get('/session/debug', async (req, res) => {
+  const token = req.get('X-Internal-Token') || '';
+  if (token !== INTERNAL_API_TOKEN) return res.status(403).json({ error: 'forbidden' });
+  res.json(await sessionStatus());
 });
 
 app.get('/auth/start', async (req, res, next) => {
