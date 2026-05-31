@@ -13,6 +13,7 @@ RUN if [ -f package-lock.json ]; then \
 
 # Copy app code
 COPY server.js ./server.js
+COPY postText.js ./postText.js
 
 EXPOSE 8080
 CMD ["node","server.js"]
