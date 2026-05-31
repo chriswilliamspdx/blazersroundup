@@ -78,14 +78,17 @@ const sessionStore = {
   },
 };
 
+const rawKeyJwk = JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK);
+const keyId = BSKY_OAUTH_KID || rawKeyJwk.kid;
+if (!keyId) throw new Error('Missing BSKY_OAUTH_KID or private JWK kid');
 const keyJwk = {
-  ...JSON.parse(BSKY_OAUTH_PRIVATE_KEY_JWK),
-  kid: BSKY_OAUTH_KID,
+  ...rawKeyJwk,
+  kid: keyId,
   alg: 'ES256',
   key_ops: ['sign'],
 };
 delete keyJwk.use;
-const signingKey = await JoseKey.fromImportable(keyJwk, BSKY_OAUTH_KID);
+const signingKey = await JoseKey.fromImportable(keyJwk, keyId);
 
 const clientMetadataResponse = await fetch(CLIENT_METADATA_URL);
 if (!clientMetadataResponse.ok) {
