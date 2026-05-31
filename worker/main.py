@@ -352,7 +352,7 @@ def handle_video(
         return True
     if not settings.force_transcript_retry and not db.transcript_retry_ready(video_id, settings.transcript_max_attempts):
         dlog(settings, "skip: transcript retry not due", video_id)
-        return True
+        return False
     if settings.force_transcript_retry:
         dlog(settings, "force transcript retry", video_id)
 
@@ -371,7 +371,7 @@ def handle_video(
                     settings.transcript_max_attempts,
                 )
                 log("transcript retry scheduled", video_id, "attempts", attempts, "next", retry_at)
-            return True
+            return False
         log("permanent transcript failure", video_id, exc.error_type)
         maybe_mark_seen(settings, db, feed_url, guid, video_id, published_at)
         return True
