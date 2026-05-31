@@ -16,16 +16,13 @@ import { generateKeyPairSync, randomUUID, createPublicKey } from 'node:crypto';
 const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
 const publicKey = createPublicKey(privateKey);
 
-// 2) Export to JWK (we’ll do it manually to avoid extra deps)
+// 2) Export to JWK
 function base64url(buf) {
   return Buffer.from(buf).toString('base64')
     .replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
 }
 function ecPointXY(pubKey) {
   const spki = pubKey.export({ type: 'spki', format: 'der' });
-  // Very small ASN.1 parser to grab uncompressed point:
-  // Last bytes should be: 0x03 0x42 0x00 0x04 || X(32) || Y(32)
-  // We'll search for 0x04 that begins the uncompressed point.
   const idx = spki.lastIndexOf(0x04);
   if (idx < 0 || idx + 65 > spki.length) throw new Error('Failed to parse EC public key point');
   const X = spki.subarray(idx + 1, idx + 33);
@@ -36,23 +33,16 @@ function ecPointXY(pubKey) {
 const kid = randomUUID();
 const { x, y } = ecPointXY(publicKey);
 
-// Private JWK (has "d")
-const pkcs8Der = privateKey.export({ type: 'pkcs8', format: 'der' });
-/* PKCS#8 EC private-key structure:
-   The "d" (private scalar) is contained in an OCTET STRING. A robust ASN.1
-   parser is overkill here; instead, export a JWK using the runtime:
-*/
 import('jose').then(async ({ exportJWK, exportPKCS8 }) => {
   const privJwk = await exportJWK(privateKey);
-  const pubJwk  = await exportJWK(publicKey);
-  // Normalize to expected fields & annotate
   const PRIVATE_JWK = {
     kty: 'EC',
     crv: 'P-256',
     x,
     y,
-    d: privJwk.d,        // secret
-    use: 'sig',
+    d: privJwk.d,
+    alg: 'ES256',
+    key_ops: ['sign'],
     kid
   };
   const PUBLIC_JWK = {
@@ -60,7 +50,8 @@ import('jose').then(async ({ exportJWK, exportPKCS8 }) => {
     crv: 'P-256',
     x,
     y,
-    use: 'sig',
+    alg: 'ES256',
+    key_ops: ['verify'],
     kid
   };
   const privPem = await exportPKCS8(privateKey);
