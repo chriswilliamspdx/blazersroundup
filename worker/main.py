@@ -46,6 +46,7 @@ class WorkerSettings:
     dry_run: bool
     dry_run_record_transcript_retries: bool
     force_one_shot: bool
+    feed_mode: str
     scan_pause_seconds: float
     transcript_retry_minutes: int
     transcript_max_attempts: int
@@ -70,6 +71,7 @@ class WorkerSettings:
             dry_run=os.getenv("DRY_RUN", "0") == "1",
             dry_run_record_transcript_retries=os.getenv("DRY_RUN_RECORD_TRANSCRIPT_RETRIES", "1") == "1",
             force_one_shot=os.getenv("FORCE_ONE_SHOT", "0") == "1",
+            feed_mode=os.getenv("FEED_MODE", "all").lower(),
             scan_pause_seconds=float(os.getenv("SCAN_PAUSE_SECONDS", "2.0")),
             transcript_retry_minutes=int(os.getenv("TRANSCRIPT_RETRY_MINUTES", "60")),
             transcript_max_attempts=int(os.getenv("TRANSCRIPT_MAX_ATTEMPTS", "5")),
@@ -455,27 +457,25 @@ def process_channel(
 def poll_once(settings: WorkerSettings, db: Database, summarizer: GeminiSummarizer, config: dict, transcript_settings):
     log("polling...")
     remaining = settings.max_videos_per_poll
-    for feed in config.get("national_feeds", []):
-        if remaining <= 0:
-            log("poll video budget reached")
-            return
-        channel_id = feed.get("youtube_channel_id")
-        if not channel_id:
-            log("skip national feed without youtube_channel_id", feed.get("youtube_search") or feed.get("rss"))
-            continue
-        remaining -= process_channel(settings, db, summarizer, config, transcript_settings, channel_id, "national") or 0
-        time.sleep(settings.scan_pause_seconds)
+    feed_groups = []
+    if settings.feed_mode in ("all", "national"):
+        feed_groups.append(("national_feeds", "national"))
+    if settings.feed_mode in ("all", "blazers"):
+        feed_groups.append(("blazers_feeds", "blazers"))
+    if not feed_groups:
+        raise RuntimeError("FEED_MODE must be one of: all, national, blazers")
 
-    for feed in config.get("blazers_feeds", []):
-        if remaining <= 0:
-            log("poll video budget reached")
-            return
-        channel_id = feed.get("youtube_channel_id")
-        if not channel_id:
-            log("skip blazers feed without youtube_channel_id", feed.get("youtube_search") or feed.get("rss"))
-            continue
-        remaining -= process_channel(settings, db, summarizer, config, transcript_settings, channel_id, "blazers") or 0
-        time.sleep(settings.scan_pause_seconds)
+    for config_key, mode in feed_groups:
+        for feed in config.get(config_key, []):
+            if remaining <= 0:
+                log("poll video budget reached")
+                return
+            channel_id = feed.get("youtube_channel_id")
+            if not channel_id:
+                log(f"skip {mode} feed without youtube_channel_id", feed.get("youtube_search") or feed.get("rss"))
+                continue
+            remaining -= process_channel(settings, db, summarizer, config, transcript_settings, channel_id, mode) or 0
+            time.sleep(settings.scan_pause_seconds)
 
 
 def loop():
