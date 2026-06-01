@@ -20,6 +20,8 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - If the newest YouTube entry is an upcoming live event, the worker skips it and tries the next newest entry from that channel.
 - Successfully handled newest videos advance that feed's baseline.
 - Transcript failures do not advance the feed baseline; the episode stays eligible for a later retry.
+- Gemini quota or API failures do not crash the worker; the episode stays eligible for a later retry.
+- If Gemini reports a daily quota limit, the worker pauses Gemini work until shortly after the next Pacific-time daily reset.
 - Transcript provider order is:
   1. `youtube-transcript-api`
   2. `yt-dlp` caption-only fallback (`skip_download=True`)
@@ -62,13 +64,19 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `WEB_BASE_URL` = `https://<your-web>.up.railway.app`
 - `INTERNAL_API_TOKEN` = same value as web
 - `GEMINI_API_KEY`
-- `GEMINI_MODEL` = `gemini-2.5-flash-lite` (optional default)
+- `GEMINI_MODEL` = `gemini-3.1-flash-lite` (recommended; default remains `gemini-2.5-flash-lite`)
+- `GEMINI_THINKING_LEVEL` = `low` for Gemini 3 models (optional)
+- `LLM_MAX_CALLS_PER_POLL` = 10 (optional, lower to 3-5 while testing)
+- `LLM_RETRY_MINUTES` = 60 (optional)
+- `LLM_MAX_ATTEMPTS` = 5 (optional)
+- `LLM_QUOTA_COOLDOWN_MINUTES` = 60 (optional fallback when Gemini gives no retry/reset details)
 - `POLL_INTERVAL_SECONDS` = 600 (optional)
 - `TIMEZONE` = `America/Los_Angeles` (optional)
 - `DRY_RUN` = 1 to log planned posts without posting or marking episodes seen
 - `DRY_RUN_RECORD_TRANSCRIPT_RETRIES` = 1 to still back off blocked transcripts during dry-run
 - `FORCE_TRANSCRIPT_RETRY` = 1 to ignore saved transcript cooldowns for one test run
 - `RESET_FEED_STATE` = 1 to clear feed baselines and transcript retry state on startup; remove after one deploy
+- `RESET_LLM_STATE` = 1 to clear Gemini cooldown and summary retry state on startup; remove after one deploy
 - `FEED_MODE` = `all`, `national`, or `blazers` (optional, use `blazers` while testing)
 - `MAX_VIDEOS_PER_FEED` = 1 (optional; the worker only considers the newest episode per feed)
 - `MAX_FEED_CANDIDATE_FALLBACKS` = 5 (optional; only used to step past upcoming live videos)

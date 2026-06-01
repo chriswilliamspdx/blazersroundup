@@ -4,7 +4,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import feedparser
 import psycopg2
@@ -12,6 +12,7 @@ import requests
 import yaml
 from dateutil import parser as dtparse, tz
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types as gtypes
 from psycopg2.extras import RealDictCursor
 
@@ -56,6 +57,7 @@ class WorkerSettings:
     force_one_shot: bool
     force_transcript_retry: bool
     reset_feed_state: bool
+    reset_llm_state: bool
     feed_mode: str
     scan_pause_seconds: float
     transcript_retry_minutes: int
@@ -63,6 +65,11 @@ class WorkerSettings:
     max_videos_per_feed: int
     max_feed_candidate_fallbacks: int
     max_videos_per_poll: int
+    llm_max_calls_per_poll: int
+    llm_retry_minutes: int
+    llm_max_attempts: int
+    llm_quota_cooldown_minutes: int
+    gemini_thinking_level: str
 
     @classmethod
     def from_env(cls):
@@ -84,6 +91,7 @@ class WorkerSettings:
             force_one_shot=os.getenv("FORCE_ONE_SHOT", "0") == "1",
             force_transcript_retry=os.getenv("FORCE_TRANSCRIPT_RETRY", "0") == "1",
             reset_feed_state=os.getenv("RESET_FEED_STATE", "0") == "1",
+            reset_llm_state=os.getenv("RESET_LLM_STATE", "0") == "1",
             feed_mode=os.getenv("FEED_MODE", "all").lower(),
             scan_pause_seconds=float(os.getenv("SCAN_PAUSE_SECONDS", "2.0")),
             transcript_retry_minutes=int(os.getenv("TRANSCRIPT_RETRY_MINUTES", "60")),
@@ -91,6 +99,11 @@ class WorkerSettings:
             max_videos_per_feed=int(os.getenv("MAX_VIDEOS_PER_FEED", "1")),
             max_feed_candidate_fallbacks=int(os.getenv("MAX_FEED_CANDIDATE_FALLBACKS", "5")),
             max_videos_per_poll=int(os.getenv("MAX_VIDEOS_PER_POLL", "40")),
+            llm_max_calls_per_poll=int(os.getenv("LLM_MAX_CALLS_PER_POLL", "10")),
+            llm_retry_minutes=int(os.getenv("LLM_RETRY_MINUTES", "60")),
+            llm_max_attempts=int(os.getenv("LLM_MAX_ATTEMPTS", "5")),
+            llm_quota_cooldown_minutes=int(os.getenv("LLM_QUOTA_COOLDOWN_MINUTES", "60")),
+            gemini_thinking_level=os.getenv("GEMINI_THINKING_LEVEL", "low"),
         )
 
 
@@ -161,6 +174,31 @@ class Database:
             );
             """
         )
+        self.exec(
+            """
+            create table if not exists summary_attempts (
+              video_id text primary key,
+              last_attempt_at timestamptz not null default now(),
+              attempt_count integer not null default 0,
+              last_error_type text,
+              next_retry_at timestamptz
+            );
+            """
+        )
+
+    def get_state(self, key: str):
+        rows = self.exec("select value from state where key=%s", [key])
+        return rows[0]["value"] if rows else None
+
+    def set_state(self, key: str, value: str):
+        self.exec(
+            "insert into state(key, value) values(%s, %s) "
+            "on conflict (key) do update set value = excluded.value",
+            [key, value],
+        )
+
+    def delete_state(self, key: str):
+        self.exec("delete from state where key=%s", [key])
 
     def _baseline_key(self, feed_url: str) -> str:
         digest = hashlib.sha1(feed_url.encode("utf-8")).hexdigest()
@@ -201,6 +239,12 @@ class Database:
     def reset_feed_state(self):
         self.exec("delete from state where key like 'feed_baseline:%%'")
         self.exec("delete from transcript_attempts")
+        self.exec("delete from summary_attempts")
+
+    def reset_llm_state(self):
+        self.exec("delete from summary_attempts")
+        self.delete_state("llm_cooldown_until")
+        self.delete_state("llm_cooldown_reason")
 
     def get_transcript_attempt(self, video_id: str):
         rows = self.exec("select * from transcript_attempts where video_id=%s", [video_id])
@@ -238,34 +282,195 @@ class Database:
         )
         return attempt_count, next_retry_at
 
+    def get_summary_attempt(self, video_id: str):
+        rows = self.exec("select * from summary_attempts where video_id=%s", [video_id])
+        return rows[0] if rows else None
+
+    def summary_retry_ready(self, video_id: str, max_attempts: int, now=None) -> bool:
+        attempt = self.get_summary_attempt(video_id)
+        return transcript_retry_due(attempt, max_attempts, now or datetime.now(UTC))
+
+    def record_summary_success(self, video_id: str):
+        self.exec("delete from summary_attempts where video_id=%s", [video_id])
+
+    def record_summary_failure(self, video_id: str, error_type: str, retry_minutes: int, max_attempts: int):
+        existing = self.get_summary_attempt(video_id)
+        attempt_count = int(existing["attempt_count"]) + 1 if existing else 1
+        now = datetime.now(UTC)
+        next_retry_at = next_retry_at_for_attempt(now, attempt_count, retry_minutes, max_attempts)
+        self.exec(
+            """
+            insert into summary_attempts(video_id, last_attempt_at, attempt_count, last_error_type, next_retry_at)
+            values(%s, %s, %s, %s, %s)
+            on conflict(video_id) do update set
+              last_attempt_at = excluded.last_attempt_at,
+              attempt_count = excluded.attempt_count,
+              last_error_type = excluded.last_error_type,
+              next_retry_at = excluded.next_retry_at
+            """,
+            [video_id, now, attempt_count, error_type, next_retry_at],
+        )
+        return attempt_count, next_retry_at
+
+    def get_llm_cooldown_until(self):
+        value = self.get_state("llm_cooldown_until")
+        if not value:
+            return None
+        try:
+            return dtparse.isoparse(value).astimezone(UTC)
+        except Exception:
+            return None
+
+    def llm_cooldown_active(self, now=None):
+        cooldown_until = self.get_llm_cooldown_until()
+        if not cooldown_until:
+            return None
+        now = now or datetime.now(UTC)
+        if cooldown_until <= now:
+            self.delete_state("llm_cooldown_until")
+            self.delete_state("llm_cooldown_reason")
+            return None
+        return cooldown_until
+
+    def set_llm_cooldown(self, cooldown_until: datetime, reason: str):
+        cooldown_until = cooldown_until.astimezone(UTC)
+        self.set_state("llm_cooldown_until", cooldown_until.isoformat())
+        self.set_state("llm_cooldown_reason", reason)
+        return cooldown_until
+
+
+class LLMError(Exception):
+    def __init__(self, error_type: str, message: str = ""):
+        super().__init__(message or error_type)
+        self.error_type = error_type
+
+
+class LLMQuotaError(LLMError):
+    def __init__(self, cooldown_until: datetime, error_type: str = "LLMQuota", message: str = ""):
+        super().__init__(error_type, message)
+        self.cooldown_until = cooldown_until
+
+
+@dataclass
+class PollContext:
+    llm_limit: int
+    llm_calls: int = 0
+    llm_wait: bool = False
+    llm_wait_reason: str = ""
+
+    def has_llm_capacity(self) -> bool:
+        return self.llm_limit < 0 or self.llm_calls < self.llm_limit
+
+    def reserve_llm_call(self) -> bool:
+        if not self.has_llm_capacity():
+            self.llm_wait = True
+            self.llm_wait_reason = "budget"
+            return False
+        self.llm_calls += 1
+        return True
+
+
+def _retry_delay_seconds_from_payload(payload) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    for detail in payload.get("error", {}).get("details", []):
+        delay = detail.get("retryDelay") if isinstance(detail, dict) else None
+        if isinstance(delay, str):
+            match = re.match(r"^(\d+)(?:\.\d+)?s$", delay)
+            if match:
+                return int(match.group(1))
+    return None
+
+
+def _is_daily_quota_payload(payload) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    error = payload.get("error", {})
+    message = str(error.get("message", ""))
+    if "PerDay" in message or "requests per day" in message.lower():
+        return True
+    for detail in error.get("details", []):
+        for violation in (detail.get("violations") or []) if isinstance(detail, dict) else []:
+            quota_id = str(violation.get("quotaId", ""))
+            quota_metric = str(violation.get("quotaMetric", ""))
+            if "PerDay" in quota_id or "requests_per_day" in quota_metric:
+                return True
+    return False
+
+
+def _next_pacific_quota_reset(now=None) -> datetime:
+    pacific = tz.gettz("America/Los_Angeles")
+    now = now or datetime.now(UTC)
+    local_now = now.astimezone(pacific)
+    next_day = (local_now + timedelta(days=1)).date()
+    midnight_local = datetime.combine(next_day, datetime.min.time()).replace(tzinfo=pacific)
+    return midnight_local.astimezone(UTC) + timedelta(minutes=5)
+
+
+def _payload_from_genai_error(exc):
+    payload = getattr(exc, "response_json", None)
+    if isinstance(payload, dict):
+        return payload
+    for arg in getattr(exc, "args", []):
+        if isinstance(arg, dict):
+            return arg
+    return None
+
+
+def _cooldown_until_for_genai_error(exc, fallback_minutes: int) -> datetime:
+    now = datetime.now(UTC)
+    payload = _payload_from_genai_error(exc)
+    if _is_daily_quota_payload(payload):
+        return _next_pacific_quota_reset(now)
+    retry_seconds = _retry_delay_seconds_from_payload(payload)
+    if retry_seconds is not None:
+        return now + timedelta(seconds=max(retry_seconds, 1))
+    return now + timedelta(minutes=fallback_minutes)
+
+
+def _thinking_config_for_model(model: str, thinking_level: str):
+    if model.startswith("gemini-3"):
+        return gtypes.ThinkingConfig(thinking_level=thinking_level)
+    return gtypes.ThinkingConfig(thinking_budget=0)
+
 
 class GeminiSummarizer:
-    def __init__(self, api_key: str, model: str):
+    def __init__(self, api_key: str, model: str, thinking_level: str, quota_cooldown_minutes: int):
         self.model = model
+        self.thinking_level = thinking_level
+        self.quota_cooldown_minutes = quota_cooldown_minutes
         self.client = genai.Client(api_key=api_key)
 
     def summarize_json(self, prompt: str, text: str):
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=[{"role": "user", "parts": [{"text": prompt + "\n\n" + text}]}],
-            config=gtypes.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema={
-                    "type": "object",
-                    "properties": {
-                        "is_blazers": {"type": "boolean"},
-                        "topic": {"type": "string"},
-                        "summary": {"type": "string"},
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=[{"role": "user", "parts": [{"text": prompt + "\n\n" + text}]}],
+                config=gtypes.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema={
+                        "type": "object",
+                        "properties": {
+                            "is_blazers": {"type": "boolean"},
+                            "topic": {"type": "string"},
+                            "summary": {"type": "string"},
+                        },
+                        "required": ["is_blazers"],
                     },
-                    "required": ["is_blazers"],
-                },
-                thinking_config=gtypes.ThinkingConfig(thinking_budget=0),
-            ),
-        )
+                    thinking_config=_thinking_config_for_model(self.model, self.thinking_level),
+                ),
+            )
+        except genai_errors.ClientError as exc:
+            status_code = getattr(exc, "status_code", None)
+            if status_code == 429:
+                raise LLMQuotaError(_cooldown_until_for_genai_error(exc, self.quota_cooldown_minutes), message=str(exc))
+            raise LLMError("LLMClientError", str(exc)) from exc
+        except Exception as exc:
+            raise LLMError("LLMError", str(exc)) from exc
         try:
             return json.loads(response.text or "{}")
         except Exception:
-            return {}
+            raise LLMError("LLMInvalidJson", response.text or "")
 
 
 def yt_channel_feed_url(channel_id: str) -> str:
@@ -360,6 +565,7 @@ def handle_video(
     summarizer: GeminiSummarizer,
     config: dict,
     transcript_settings,
+    poll_context: PollContext,
     feed_url: str,
     show_name: str,
     mode: str,
@@ -375,6 +581,19 @@ def handle_video(
     if db.already_seen(feed_url, guid, video_id):
         dlog(settings, "skip: already seen", video_id)
         return VIDEO_OK
+    cooldown_until = db.llm_cooldown_active()
+    if cooldown_until:
+        poll_context.llm_wait = True
+        poll_context.llm_wait_reason = "cooldown"
+        log("Gemini cooldown active until", cooldown_until.isoformat())
+        return VIDEO_RETRY_LATER
+    if not poll_context.has_llm_capacity():
+        poll_context.llm_wait = True
+        poll_context.llm_wait_reason = "budget"
+        return VIDEO_RETRY_LATER
+    if not db.summary_retry_ready(video_id, settings.llm_max_attempts):
+        dlog(settings, "skip: Gemini retry not due", video_id)
+        return VIDEO_RETRY_LATER
     if not settings.force_transcript_retry and not db.transcript_retry_ready(video_id, settings.transcript_max_attempts):
         dlog(settings, "skip: transcript retry not due", video_id)
         return VIDEO_RETRY_LATER
@@ -419,7 +638,42 @@ def handle_video(
         jump_seconds = start_seconds
 
     model_input = build_model_input(mode, title, video_id, start_seconds is not None, snippet)
-    output = summarizer.summarize_json(build_summary_prompt(config.get("exclude_note", "")), model_input)
+    if not poll_context.reserve_llm_call():
+        return VIDEO_RETRY_LATER
+    dlog(
+        settings,
+        "Gemini request",
+        poll_context.llm_calls,
+        "of",
+        settings.llm_max_calls_per_poll if settings.llm_max_calls_per_poll >= 0 else "unlimited",
+        video_id,
+    )
+    try:
+        output = summarizer.summarize_json(build_summary_prompt(config.get("exclude_note", "")), model_input)
+        db.record_summary_success(video_id)
+    except LLMQuotaError as exc:
+        cooldown_until = db.set_llm_cooldown(exc.cooldown_until, exc.error_type)
+        poll_context.llm_wait = True
+        poll_context.llm_wait_reason = "cooldown"
+        attempts, retry_at = db.record_summary_failure(
+            video_id,
+            exc.error_type,
+            settings.llm_retry_minutes,
+            settings.llm_max_attempts,
+        )
+        log("Gemini quota exhausted; cooldown until", cooldown_until.isoformat())
+        log("Gemini retry scheduled", video_id, "attempts", attempts, "next", retry_at)
+        return VIDEO_RETRY_LATER
+    except LLMError as exc:
+        attempts, retry_at = db.record_summary_failure(
+            video_id,
+            exc.error_type,
+            settings.llm_retry_minutes,
+            settings.llm_max_attempts,
+        )
+        log("Gemini failure", video_id, exc.error_type)
+        log("Gemini retry scheduled", video_id, "attempts", attempts, "next", retry_at)
+        return VIDEO_RETRY_LATER
     if not output.get("is_blazers"):
         dlog(settings, "gemini says not blazers", video_id)
         maybe_mark_seen(settings, db, feed_url, guid, video_id, published_at)
@@ -452,6 +706,7 @@ def process_channel(
     summarizer: GeminiSummarizer,
     config: dict,
     transcript_settings,
+    poll_context: PollContext,
     feed: dict,
     mode: str,
 ):
@@ -488,9 +743,23 @@ def process_channel(
     processed = 0
     newest_completed_pub = None
     for published_at, entry, video_id in candidates:
+        if poll_context.llm_wait:
+            break
         if processed >= settings.max_videos_per_feed:
             break
-        outcome = handle_video(settings, db, summarizer, config, transcript_settings, feed_url, show_name, mode, entry, video_id)
+        outcome = handle_video(
+            settings,
+            db,
+            summarizer,
+            config,
+            transcript_settings,
+            poll_context,
+            feed_url,
+            show_name,
+            mode,
+            entry,
+            video_id,
+        )
         if outcome == VIDEO_SKIP_CANDIDATE:
             continue
         processed += 1
@@ -506,6 +775,14 @@ def process_channel(
 
 
 def poll_once(settings: WorkerSettings, db: Database, summarizer: GeminiSummarizer, config: dict, transcript_settings):
+    cooldown_until = db.llm_cooldown_active()
+    if cooldown_until:
+        log("Gemini cooldown active until", cooldown_until.isoformat())
+        return
+    poll_context = PollContext(settings.llm_max_calls_per_poll)
+    if not poll_context.has_llm_capacity():
+        log("Gemini poll budget is 0; skipping poll")
+        return
     log("polling...")
     remaining = settings.max_videos_per_poll
     feed_groups = []
@@ -525,7 +802,13 @@ def poll_once(settings: WorkerSettings, db: Database, summarizer: GeminiSummariz
             if not channel_id:
                 log(f"skip {mode} feed without youtube_channel_id", feed.get("youtube_search") or feed.get("rss"))
                 continue
-            remaining -= process_channel(settings, db, summarizer, config, transcript_settings, feed, mode) or 0
+            remaining -= process_channel(settings, db, summarizer, config, transcript_settings, poll_context, feed, mode) or 0
+            if poll_context.llm_wait:
+                if poll_context.llm_wait_reason == "budget":
+                    log("Gemini poll budget reached")
+                else:
+                    log("Gemini poll paused", poll_context.llm_wait_reason or "waiting")
+                return
             time.sleep(settings.scan_pause_seconds)
 
 
@@ -538,8 +821,19 @@ def loop():
     if settings.reset_feed_state:
         db.reset_feed_state()
         log("RESET_FEED_STATE enabled: feed baselines and transcript retry state were cleared")
-    summarizer = GeminiSummarizer(settings.gemini_key, settings.gemini_model)
+    if settings.reset_llm_state:
+        db.reset_llm_state()
+        log("RESET_LLM_STATE enabled: Gemini cooldown and summary retry state were cleared")
+    summarizer = GeminiSummarizer(
+        settings.gemini_key,
+        settings.gemini_model,
+        settings.gemini_thinking_level,
+        settings.llm_quota_cooldown_minutes,
+    )
     log("Gemini model", settings.gemini_model)
+    if settings.gemini_model.startswith("gemini-3"):
+        log("Gemini thinking level", settings.gemini_thinking_level)
+    log("Gemini poll request budget", settings.llm_max_calls_per_poll if settings.llm_max_calls_per_poll >= 0 else "unlimited")
     if transcript_settings.ytdlp_cookies:
         log("yt-dlp cookies enabled")
     else:

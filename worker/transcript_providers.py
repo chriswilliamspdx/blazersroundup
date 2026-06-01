@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass
 from typing import Callable
 
@@ -34,7 +35,7 @@ except ModuleNotFoundError as exc:
 
 LANGUAGE_PRIORITY = ["en", "en-US", "en-GB"]
 CAPTION_FORMAT_PRIORITY = ["json3", "vtt"]
-COOKIE_FILE_PATH = "/tmp/ytdlp-cookies.txt"
+COOKIE_FILE_PATH = os.path.join(tempfile.gettempdir(), "ytdlp-cookies.txt")
 
 
 @dataclass

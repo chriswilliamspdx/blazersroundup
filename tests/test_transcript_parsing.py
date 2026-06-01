@@ -61,7 +61,7 @@ Trail Blazers segment starts
 
             cookie_path = cookiefile_from_env()
 
-            self.assertEqual(cookie_path, "/tmp/ytdlp-cookies.txt")
+            self.assertEqual(Path(cookie_path).name, "ytdlp-cookies.txt")
             self.assertTrue(Path(cookie_path).exists())
             self.assertIn("Netscape HTTP Cookie File", Path(cookie_path).read_text(encoding="utf-8"))
         finally:
