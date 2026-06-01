@@ -197,7 +197,7 @@ class Database:
         )
 
     def reset_feed_state(self):
-        self.exec("delete from state where key like 'feed_baseline:%'")
+        self.exec("delete from state where key like 'feed_baseline:%%'")
         self.exec("delete from transcript_attempts")
 
     def get_transcript_attempt(self, video_id: str):
