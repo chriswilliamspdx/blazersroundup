@@ -81,6 +81,7 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `TRANSCRIPT_PROXY_ATTEMPTS` = 2 (optional)
 - `TRANSCRIPT_PROXY_YTDLP_ENABLED` = 0 or 1 (optional)
 - `TRANSCRIPT_PROXY_YTDLP_ATTEMPTS` = 1 (optional)
+- `TRANSCRIPT_REQUEST_TIMEOUT_SECONDS` = 10.0 (optional)
 - `TRANSCRIPT_PROXY_TIMEOUT_SECONDS` = 10.0 (optional)
 - `SWIFTSHADOW_COUNTRIES` = `US` (optional)
 - `SWIFTSHADOW_PROTOCOLS` = `http,https` (optional)
