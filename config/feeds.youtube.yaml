@@ -67,6 +67,7 @@ national_feeds:
   youtube_channel_id: UC2ozVs4pg2K3uFLw6-0ayCQ
 - rss: https://anchor.fm/s/485def10/podcast/rss
   youtube_search: 'You Know Ball: A (Mostly) NBA Podcast'
+  show_name: You Know Ball with TrillBroDude
   youtube_channel_id: UCRwGfmzcQrhTQYugP0jmoZA
 - rss: https://feeds.simplecast.com/wiOjZJf6
   youtube_search: Game Theory Podcast
@@ -94,6 +95,7 @@ national_feeds:
   youtube_channel_id: UCt9OPdYh9weYNaYnF7ROZEQ
 blazers_feeds:
 - rss: http://feeds.megaphone.fm/lockedonblazers
+  show_name: Locked On Blazers
   youtube_search: http://feeds.megaphone.fm/lockedonblazers
   youtube_channel_id: UCeE7WdPaNWwA-IZGfHek90Q
 - rss: https://anchor.fm/s/146511c/podcast/rss
