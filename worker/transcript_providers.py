@@ -47,6 +47,7 @@ class TranscriptSettings:
     proxy_attempts: int = 2
     proxy_ytdlp_enabled: bool = True
     proxy_ytdlp_attempts: int = 1
+    request_timeout_seconds: float = 10.0
     ytdlp_cookies: str | None = None
     ytdlp_extractor_clients: list[str] | None = None
     ytdlp_sleep_requests: float = 1.0
@@ -76,6 +77,16 @@ class TranscriptError(Exception):
         super().__init__(message)
         self.error_type = error_type
         self.transient = transient
+
+
+class TimeoutSession(requests.Session):
+    def __init__(self, timeout_seconds: float):
+        super().__init__()
+        self.timeout_seconds = timeout_seconds
+
+    def request(self, method, url, **kwargs):
+        kwargs.setdefault("timeout", self.timeout_seconds)
+        return super().request(method, url, **kwargs)
 
 
 def is_live_unavailable_message(message: str) -> bool:
@@ -179,8 +190,12 @@ def _classify_yta_error(exc: Exception) -> TranscriptError:
     return TranscriptError(str(exc), exc.__class__.__name__, transient=True)
 
 
-def fetch_with_youtube_transcript_api(video_id: str, proxy_url: str | None = None) -> TranscriptResult:
-    kwargs = {}
+def fetch_with_youtube_transcript_api(
+    video_id: str,
+    proxy_url: str | None = None,
+    timeout_seconds: float = 10.0,
+) -> TranscriptResult:
+    kwargs = {"http_client": TimeoutSession(timeout_seconds)}
     if proxy_url:
         from youtube_transcript_api.proxies import GenericProxyConfig
 
@@ -431,7 +446,7 @@ def fetch_transcript(video_id: str, settings: TranscriptSettings, log: Callable[
     errors: list[TranscriptError] = []
 
     for provider_name, call in (
-        ("youtube-transcript-api", lambda: fetch_with_youtube_transcript_api(video_id)),
+        ("youtube-transcript-api", lambda: fetch_with_youtube_transcript_api(video_id, timeout_seconds=settings.request_timeout_seconds)),
         ("yt-dlp-caption", lambda: fetch_with_ytdlp(video_id, settings)),
     ):
         try:
@@ -467,7 +482,11 @@ def fetch_transcript(video_id: str, settings: TranscriptSettings, log: Callable[
                 try:
                     proxy_url = next_proxy()
                     log("trying transcript proxy", source, "youtube-transcript-api", attempt + 1)
-                    result = fetch_with_youtube_transcript_api(video_id, proxy_url=proxy_url)
+                    result = fetch_with_youtube_transcript_api(
+                        video_id,
+                        proxy_url=proxy_url,
+                        timeout_seconds=settings.request_timeout_seconds,
+                    )
                     log("transcript ok", video_id, result.provider)
                     return result
                 except TranscriptError as exc:
@@ -524,6 +543,7 @@ def settings_from_env() -> TranscriptSettings:
         proxy_attempts=int(os.getenv("TRANSCRIPT_PROXY_ATTEMPTS", "2")),
         proxy_ytdlp_enabled=os.getenv("TRANSCRIPT_PROXY_YTDLP_ENABLED", "1") == "1",
         proxy_ytdlp_attempts=int(os.getenv("TRANSCRIPT_PROXY_YTDLP_ATTEMPTS", "1")),
+        request_timeout_seconds=float(os.getenv("TRANSCRIPT_REQUEST_TIMEOUT_SECONDS", os.getenv("TRANSCRIPT_PROXY_TIMEOUT_SECONDS", "10.0"))),
         ytdlp_cookies=cookiefile_from_env(),
         ytdlp_extractor_clients=clients or ["android", "web"],
         ytdlp_sleep_requests=float(os.getenv("YTDLP_SLEEP_REQUESTS", "1.0")),
