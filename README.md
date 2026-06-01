@@ -79,6 +79,8 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `TRANSCRIPT_PROXY_ENABLED` = 0 or 1 (optional)
 - `TRANSCRIPT_PROXY_SOURCES` = `swiftshadow` or `swiftshadow,1proxy` (optional)
 - `TRANSCRIPT_PROXY_ATTEMPTS` = 2 (optional)
+- `TRANSCRIPT_PROXY_YTDLP_ENABLED` = 0 or 1 (optional)
+- `TRANSCRIPT_PROXY_YTDLP_ATTEMPTS` = 1 (optional)
 - `TRANSCRIPT_PROXY_TIMEOUT_SECONDS` = 10.0 (optional)
 - `SWIFTSHADOW_COUNTRIES` = `US` (optional)
 - `SWIFTSHADOW_PROTOCOLS` = `http,https` (optional)
@@ -93,8 +95,12 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `YTDLP_COOKIES` = optional path to cookies file
 - `YTDLP_COOKIES_TEXT` = optional private Railway variable containing a Netscape-format cookies file
 - `YTDLP_COOKIES_B64` = optional base64 version of `YTDLP_COOKIES_TEXT`
+- `YTDLP_SOCKET_TIMEOUT_SECONDS` = 8.0 (optional)
+- `YTDLP_RETRIES` = 1 (optional)
+- `YTDLP_EXTRACTOR_RETRIES` = 1 (optional)
 
 Use a dedicated YouTube account for cookies, not your primary personal account.
+If free proxies make `yt-dlp` sit on bad proxy tunnels for too long, set `TRANSCRIPT_PROXY_YTDLP_ENABLED=0` to keep proxy retries focused on `youtube-transcript-api`.
 
 ## Local checks
 
