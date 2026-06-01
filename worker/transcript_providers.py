@@ -45,9 +45,14 @@ class TranscriptSettings:
     swiftshadow_protocol: str = "https"
     swiftshadow_protocols: list[str] | None = None
     proxy_attempts: int = 2
+    proxy_ytdlp_enabled: bool = True
+    proxy_ytdlp_attempts: int = 1
     ytdlp_cookies: str | None = None
     ytdlp_extractor_clients: list[str] | None = None
     ytdlp_sleep_requests: float = 1.0
+    ytdlp_socket_timeout_seconds: float = 8.0
+    ytdlp_retries: int = 1
+    ytdlp_extractor_retries: int = 1
     oneproxy_api_url: str | None = None
     oneproxy_country: str | None = None
     oneproxy_protocols: list[str] | None = None
@@ -222,6 +227,11 @@ def fetch_with_ytdlp(video_id: str, settings: TranscriptSettings, proxy_url: str
         "quiet": True,
         "skip_download": True,
         "sleep_requests": settings.ytdlp_sleep_requests,
+        "socket_timeout": settings.ytdlp_socket_timeout_seconds,
+        "retries": settings.ytdlp_retries,
+        "fragment_retries": settings.ytdlp_retries,
+        "extractor_retries": settings.ytdlp_extractor_retries,
+        "file_access_retries": settings.ytdlp_retries,
         "extractor_args": {"youtube": {"player_client": settings.ytdlp_extractor_clients or ["android", "web"]}},
     }
     if settings.ytdlp_cookies:
@@ -456,19 +466,36 @@ def fetch_transcript(video_id: str, settings: TranscriptSettings, log: Callable[
             for attempt in range(max(1, settings.proxy_attempts)):
                 try:
                     proxy_url = next_proxy()
-                    log("trying transcript proxy", source, attempt + 1)
-                    try:
-                        result = fetch_with_youtube_transcript_api(video_id, proxy_url=proxy_url)
-                    except TranscriptError:
-                        result = fetch_with_ytdlp(video_id, settings, proxy_url=proxy_url)
+                    log("trying transcript proxy", source, "youtube-transcript-api", attempt + 1)
+                    result = fetch_with_youtube_transcript_api(video_id, proxy_url=proxy_url)
                     log("transcript ok", video_id, result.provider)
                     return result
                 except TranscriptError as exc:
+                    if exc.error_type == "LiveUpcoming":
+                        raise exc
                     errors.append(exc)
                     log("transcript proxy failed", video_id, exc.error_type)
                 except Exception as exc:
                     errors.append(TranscriptError(str(exc), exc.__class__.__name__, transient=True))
                     log("transcript proxy failed", video_id, exc.__class__.__name__)
+
+        if settings.proxy_ytdlp_enabled:
+            for source, next_proxy in proxy_factories:
+                for attempt in range(max(0, settings.proxy_ytdlp_attempts)):
+                    try:
+                        proxy_url = next_proxy()
+                        log("trying transcript proxy", source, "yt-dlp", attempt + 1)
+                        result = fetch_with_ytdlp(video_id, settings, proxy_url=proxy_url)
+                        log("transcript ok", video_id, result.provider)
+                        return result
+                    except TranscriptError as exc:
+                        if exc.error_type == "LiveUpcoming":
+                            raise exc
+                        errors.append(exc)
+                        log("transcript proxy failed", video_id, exc.error_type)
+                    except Exception as exc:
+                        errors.append(TranscriptError(str(exc), exc.__class__.__name__, transient=True))
+                        log("transcript proxy failed", video_id, exc.__class__.__name__)
 
     if errors:
         all_permanent = all(not error.transient for error in errors)
@@ -495,9 +522,14 @@ def settings_from_env() -> TranscriptSettings:
         swiftshadow_protocol=os.getenv("SWIFTSHADOW_PROTOCOL", swiftshadow_protocols[0] if swiftshadow_protocols else "http").lower(),
         swiftshadow_protocols=swiftshadow_protocols or ["http", "https"],
         proxy_attempts=int(os.getenv("TRANSCRIPT_PROXY_ATTEMPTS", "2")),
+        proxy_ytdlp_enabled=os.getenv("TRANSCRIPT_PROXY_YTDLP_ENABLED", "1") == "1",
+        proxy_ytdlp_attempts=int(os.getenv("TRANSCRIPT_PROXY_YTDLP_ATTEMPTS", "1")),
         ytdlp_cookies=cookiefile_from_env(),
         ytdlp_extractor_clients=clients or ["android", "web"],
         ytdlp_sleep_requests=float(os.getenv("YTDLP_SLEEP_REQUESTS", "1.0")),
+        ytdlp_socket_timeout_seconds=float(os.getenv("YTDLP_SOCKET_TIMEOUT_SECONDS", "8.0")),
+        ytdlp_retries=int(os.getenv("YTDLP_RETRIES", "1")),
+        ytdlp_extractor_retries=int(os.getenv("YTDLP_EXTRACTOR_RETRIES", "1")),
         oneproxy_api_url=os.getenv("ONEPROXY_API_URL", "https://1proxy-api.aitradepulse.com/api/v1/proxies/rotate"),
         oneproxy_country=os.getenv("ONEPROXY_COUNTRY", "US") or None,
         oneproxy_protocols=oneproxy_protocols or ["http", "https"],
