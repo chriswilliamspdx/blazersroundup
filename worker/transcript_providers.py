@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable
 
+import requests
 from yt_dlp import YoutubeDL
 
 try:
@@ -39,11 +40,20 @@ COOKIE_FILE_PATH = "/tmp/ytdlp-cookies.txt"
 @dataclass
 class TranscriptSettings:
     proxy_enabled: bool = False
+    proxy_sources: list[str] | None = None
     swiftshadow_countries: list[str] | None = None
+    swiftshadow_protocol: str = "https"
     proxy_attempts: int = 2
     ytdlp_cookies: str | None = None
     ytdlp_extractor_clients: list[str] | None = None
     ytdlp_sleep_requests: float = 1.0
+    oneproxy_api_url: str | None = None
+    oneproxy_country: str | None = None
+    oneproxy_protocols: list[str] | None = None
+    oneproxy_limit: int = 20
+    oneproxy_min_quality: int | None = None
+    oneproxy_can_access_google: bool | None = None
+    proxy_timeout_seconds: float = 10.0
 
 
 @dataclass
@@ -218,14 +228,97 @@ def fetch_with_ytdlp(video_id: str, settings: TranscriptSettings, proxy_url: str
     return _segments_to_result(segments, provider)
 
 
-def _swiftshadow_proxy_factory(countries: list[str] | None) -> Callable[[], str]:
+def _normalize_proxy_url(value: str, default_scheme: str = "http") -> str | None:
+    value = (value or "").strip()
+    if not value:
+        return None
+    if "://" not in value:
+        value = f"{default_scheme}://{value}"
+    return value
+
+
+def _swiftshadow_proxy_factory(settings: TranscriptSettings) -> Callable[[], str]:
     from swiftshadow.classes import ProxyInterface
 
-    manager = ProxyInterface(countries=countries or ["US"], protocol="http", maxProxies=10, autoRotate=True)
+    manager = ProxyInterface(
+        countries=settings.swiftshadow_countries or ["US"],
+        protocol=settings.swiftshadow_protocol or "https",
+        maxProxies=10,
+        autoRotate=True,
+    )
 
     def next_proxy() -> str:
         proxy = manager.get()
-        return proxy.as_string()
+        return _normalize_proxy_url(proxy.as_string(), default_scheme=settings.swiftshadow_protocol or "https")
+
+    return next_proxy
+
+
+def _proxy_url_from_oneproxy_item(item) -> str | None:
+    if isinstance(item, str):
+        return _normalize_proxy_url(item)
+    if not isinstance(item, dict):
+        return None
+
+    for key in ("proxy", "url", "proxy_url", "connection_url"):
+        if item.get(key):
+            return _normalize_proxy_url(str(item[key]), default_scheme=str(item.get("protocol") or "http"))
+
+    host = item.get("host") or item.get("ip") or item.get("address")
+    port = item.get("port")
+    if not host or not port:
+        return None
+    protocol = str(item.get("protocol") or "http").lower()
+    username = item.get("username") or item.get("user")
+    password = item.get("password") or item.get("pass")
+    auth = f"{username}:{password}@" if username and password else ""
+    return _normalize_proxy_url(f"{protocol}://{auth}{host}:{port}", default_scheme=protocol)
+
+
+def _oneproxy_proxy_factory(settings: TranscriptSettings) -> Callable[[], str] | None:
+    if not settings.oneproxy_api_url:
+        return None
+
+    params = {"limit": settings.oneproxy_limit}
+    if settings.oneproxy_country:
+        params["country_code"] = settings.oneproxy_country
+    protocols = settings.oneproxy_protocols or ["http", "https"]
+    if len(protocols) == 1:
+        params["protocol"] = protocols[0]
+    if settings.oneproxy_min_quality is not None:
+        params["min_quality"] = settings.oneproxy_min_quality
+    if settings.oneproxy_can_access_google is not None:
+        params["can_access_google"] = str(settings.oneproxy_can_access_google).lower()
+
+    response = requests.get(settings.oneproxy_api_url, params=params, timeout=settings.proxy_timeout_seconds)
+    response.raise_for_status()
+    payload = response.json()
+    items = payload
+    if isinstance(payload, dict):
+        for key in ("proxies", "data", "items", "results"):
+            if isinstance(payload.get(key), list):
+                items = payload[key]
+                break
+        else:
+            items = [payload] if _proxy_url_from_oneproxy_item(payload) else []
+
+    if not isinstance(items, list):
+        return None
+
+    proxies = []
+    for item in items:
+        proxy_url = _proxy_url_from_oneproxy_item(item)
+        if proxy_url:
+            proxies.append(proxy_url)
+    if not proxies:
+        return None
+
+    index = -1
+
+    def next_proxy() -> str:
+        nonlocal index
+        index = (index + 1) % len(proxies)
+        return proxies[index]
 
     return next_proxy
 
@@ -275,17 +368,28 @@ def fetch_transcript(video_id: str, settings: TranscriptSettings, log: Callable[
                 raise exc
 
     if settings.proxy_enabled:
-        try:
-            next_proxy = _swiftshadow_proxy_factory(settings.swiftshadow_countries)
-        except Exception as exc:
-            log("swiftshadow unavailable", exc.__class__.__name__, str(exc))
-            next_proxy = None
+        proxy_factories = []
+        for source in settings.proxy_sources or ["swiftshadow"]:
+            source = source.strip().lower()
+            try:
+                if source == "swiftshadow":
+                    factory = _swiftshadow_proxy_factory(settings)
+                elif source in ("1proxy", "oneproxy"):
+                    factory = _oneproxy_proxy_factory(settings)
+                else:
+                    log("unknown transcript proxy source", source)
+                    factory = None
+            except Exception as exc:
+                log(f"{source} unavailable", exc.__class__.__name__, str(exc))
+                factory = None
+            if factory:
+                proxy_factories.append((source, factory))
 
-        if next_proxy:
+        for source, next_proxy in proxy_factories:
             for attempt in range(max(1, settings.proxy_attempts)):
                 try:
                     proxy_url = next_proxy()
-                    log("trying transcript proxy", attempt + 1)
+                    log("trying transcript proxy", source, attempt + 1)
                     try:
                         result = fetch_with_youtube_transcript_api(video_id, proxy_url=proxy_url)
                     except TranscriptError:
@@ -309,11 +413,28 @@ def fetch_transcript(video_id: str, settings: TranscriptSettings, log: Callable[
 def settings_from_env() -> TranscriptSettings:
     countries = [item.strip().upper() for item in os.getenv("SWIFTSHADOW_COUNTRIES", "US").split(",") if item.strip()]
     clients = [item.strip() for item in os.getenv("YTDLP_EXTRACTOR_CLIENTS", "android,web").split(",") if item.strip()]
+    proxy_sources = [item.strip().lower() for item in os.getenv("TRANSCRIPT_PROXY_SOURCES", "swiftshadow").split(",") if item.strip()]
+    oneproxy_protocols = [item.strip().lower() for item in os.getenv("ONEPROXY_PROTOCOLS", "http,https").split(",") if item.strip()]
+    oneproxy_min_quality = os.getenv("ONEPROXY_MIN_QUALITY")
+    oneproxy_can_access_google = os.getenv("ONEPROXY_CAN_ACCESS_GOOGLE")
     return TranscriptSettings(
         proxy_enabled=os.getenv("TRANSCRIPT_PROXY_ENABLED", "0") == "1",
+        proxy_sources=proxy_sources or ["swiftshadow"],
         swiftshadow_countries=countries or ["US"],
+        swiftshadow_protocol=os.getenv("SWIFTSHADOW_PROTOCOL", "https").lower(),
         proxy_attempts=int(os.getenv("TRANSCRIPT_PROXY_ATTEMPTS", "2")),
         ytdlp_cookies=cookiefile_from_env(),
         ytdlp_extractor_clients=clients or ["android", "web"],
         ytdlp_sleep_requests=float(os.getenv("YTDLP_SLEEP_REQUESTS", "1.0")),
+        oneproxy_api_url=os.getenv("ONEPROXY_API_URL", "https://1proxy-api.aitradepulse.com/api/v1/proxies/advanced"),
+        oneproxy_country=os.getenv("ONEPROXY_COUNTRY", "US") or None,
+        oneproxy_protocols=oneproxy_protocols or ["http", "https"],
+        oneproxy_limit=int(os.getenv("ONEPROXY_LIMIT", "20")),
+        oneproxy_min_quality=int(oneproxy_min_quality) if oneproxy_min_quality else None,
+        oneproxy_can_access_google=(
+            None
+            if oneproxy_can_access_google is None
+            else oneproxy_can_access_google.strip().lower() in ("1", "true", "yes")
+        ),
+        proxy_timeout_seconds=float(os.getenv("TRANSCRIPT_PROXY_TIMEOUT_SECONDS", "10.0")),
     )
