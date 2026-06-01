@@ -16,7 +16,15 @@ from google.genai import types as gtypes
 from psycopg2.extras import RealDictCursor
 
 from retry import next_retry_at_for_attempt, transcript_retry_due
-from text_utils import build_model_input, clamp_text, first_keyword_hit, fmt_mmss, transcript_window, youtube_link
+from text_utils import (
+    build_model_input,
+    clamp_heading_with_link,
+    clamp_text,
+    first_keyword_hit,
+    fmt_mmss,
+    transcript_window,
+    youtube_link,
+)
 from transcript_providers import TranscriptError, fetch_transcript, settings_from_env
 
 
@@ -47,6 +55,7 @@ class WorkerSettings:
     dry_run_record_transcript_retries: bool
     force_one_shot: bool
     force_transcript_retry: bool
+    reset_feed_state: bool
     feed_mode: str
     scan_pause_seconds: float
     transcript_retry_minutes: int
@@ -73,11 +82,12 @@ class WorkerSettings:
             dry_run_record_transcript_retries=os.getenv("DRY_RUN_RECORD_TRANSCRIPT_RETRIES", "1") == "1",
             force_one_shot=os.getenv("FORCE_ONE_SHOT", "0") == "1",
             force_transcript_retry=os.getenv("FORCE_TRANSCRIPT_RETRY", "0") == "1",
+            reset_feed_state=os.getenv("RESET_FEED_STATE", "0") == "1",
             feed_mode=os.getenv("FEED_MODE", "all").lower(),
             scan_pause_seconds=float(os.getenv("SCAN_PAUSE_SECONDS", "2.0")),
             transcript_retry_minutes=int(os.getenv("TRANSCRIPT_RETRY_MINUTES", "60")),
             transcript_max_attempts=int(os.getenv("TRANSCRIPT_MAX_ATTEMPTS", "5")),
-            max_videos_per_feed=int(os.getenv("MAX_VIDEOS_PER_FEED", "2")),
+            max_videos_per_feed=int(os.getenv("MAX_VIDEOS_PER_FEED", "1")),
             max_videos_per_poll=int(os.getenv("MAX_VIDEOS_PER_POLL", "40")),
         )
 
@@ -185,6 +195,10 @@ class Database:
             "values(%s, %s, %s, %s) on conflict do nothing",
             [feed_url, guid, media_id, published_at],
         )
+
+    def reset_feed_state(self):
+        self.exec("delete from state where key like 'feed_baseline:%'")
+        self.exec("delete from transcript_attempts")
 
     def get_transcript_attempt(self, video_id: str):
         rows = self.exec("select * from transcript_attempts where video_id=%s", [video_id])
@@ -321,6 +335,8 @@ def build_summary_prompt(exclude_note: str) -> str:
         "You will be given podcast metadata and a snippet from a transcript. "
         "Decide if it is about the NBA team the Portland Trail Blazers, including players, coaches, "
         "front office, ownership, draft, trades, injuries, or season context. "
+        "If the feed type is blazers, this is a dedicated Portland Trail Blazers show; summarize the episode "
+        "unless the title and transcript are clearly unrelated to the team. "
         "Exclude any generic 'trailblazer' usages not about the NBA team. "
         "Use the title as context, but do not say an episode is about the Blazers unless the title or transcript "
         "supports that conclusion. "
@@ -337,6 +353,7 @@ def handle_video(
     config: dict,
     transcript_settings,
     feed_url: str,
+    show_name: str,
     mode: str,
     entry,
     video_id: str,
@@ -377,13 +394,15 @@ def handle_video(
         return True
 
     start_seconds, _matched_text = first_keyword_hit(result.segments, keywords)
-    if start_seconds is None:
-        dlog(settings, "no direct keyword hit", video_id, mode)
-        if mode == "national":
-            maybe_mark_seen(settings, db, feed_url, guid, video_id, published_at)
-            return True
-        snippet = result.full_text[:4000]
+    if mode == "blazers":
+        if start_seconds is None:
+            dlog(settings, "no direct keyword hit", video_id, mode)
+        snippet = result.full_text[:12000]
         jump_seconds = 0
+    elif start_seconds is None:
+        dlog(settings, "no direct keyword hit", video_id, mode)
+        maybe_mark_seen(settings, db, feed_url, guid, video_id, published_at)
+        return True
     else:
         snippet = transcript_window(result.segments, start_seconds, window_seconds=180, char_limit=8000)
         jump_seconds = start_seconds
@@ -395,11 +414,13 @@ def handle_video(
         maybe_mark_seen(settings, db, feed_url, guid, video_id, published_at)
         return True
 
-    topic = (output.get("topic") or "Blazers").strip()
     link = youtube_link(video_id, jump_seconds)
-    time_text = fmt_mmss(jump_seconds) if jump_seconds > 0 else ""
     title_part = title or "New podcast episode"
-    first_text = f"{title_part}{' - ' + time_text if time_text else ''} {topic} {link}"
+    heading = f"{show_name} - {title_part}" if show_name else title_part
+    if mode == "national":
+        first_text = clamp_heading_with_link(heading, f"{fmt_mmss(jump_seconds)} {link}", post_char_limit)
+    else:
+        first_text = clamp_heading_with_link(heading, youtube_link(video_id), post_char_limit)
     second_text = (output.get("summary") or "").strip()
 
     posted = create_thread(
@@ -420,9 +441,13 @@ def process_channel(
     summarizer: GeminiSummarizer,
     config: dict,
     transcript_settings,
-    channel_id: str,
+    feed: dict,
     mode: str,
 ):
+    channel_id = feed.get("youtube_channel_id")
+    show_name = (feed.get("show_name") or feed.get("youtube_search") or "").strip()
+    if show_name.lower().startswith(("http://", "https://")):
+        show_name = ""
     feed_url = yt_channel_feed_url(channel_id)
     parsed = feedparser.parse(feed_url)
     entries = list(parsed.entries)
@@ -437,22 +462,18 @@ def process_channel(
 
     newest_pub = rows[0][0]
     baseline = db.get_feed_baseline(feed_url)
-    if baseline is None:
-        candidates = [rows[0]]
+    latest = rows[0]
+    latest_pub, _latest_entry, latest_video_id = latest
+    if baseline is None or latest_pub > baseline or db.has_due_transcript_retry(latest_video_id, settings.transcript_max_attempts):
+        candidates = [latest]
     else:
-        new_rows = [(pub, entry, video_id) for pub, entry, video_id in rows if pub > baseline]
-        due_retries = [
-            (pub, entry, video_id)
-            for pub, entry, video_id in rows
-            if pub <= baseline and db.has_due_transcript_retry(video_id, settings.transcript_max_attempts)
-        ]
-        candidates = due_retries + sorted(new_rows, key=lambda item: item[0])
+        candidates = []
 
     dlog(settings, "candidates", len(candidates), "baseline", baseline.isoformat() if baseline else None)
     all_posting_ok = True
     processed = 0
     for published_at, entry, video_id in candidates[: settings.max_videos_per_feed]:
-        ok = handle_video(settings, db, summarizer, config, transcript_settings, feed_url, mode, entry, video_id)
+        ok = handle_video(settings, db, summarizer, config, transcript_settings, feed_url, show_name, mode, entry, video_id)
         all_posting_ok = all_posting_ok and ok
         processed += 1
 
@@ -481,7 +502,7 @@ def poll_once(settings: WorkerSettings, db: Database, summarizer: GeminiSummariz
             if not channel_id:
                 log(f"skip {mode} feed without youtube_channel_id", feed.get("youtube_search") or feed.get("rss"))
                 continue
-            remaining -= process_channel(settings, db, summarizer, config, transcript_settings, channel_id, mode) or 0
+            remaining -= process_channel(settings, db, summarizer, config, transcript_settings, feed, mode) or 0
             time.sleep(settings.scan_pause_seconds)
 
 
@@ -491,6 +512,9 @@ def loop():
     transcript_settings = settings_from_env()
     db = Database(settings.db_url)
     db.ensure_schema()
+    if settings.reset_feed_state:
+        db.reset_feed_state()
+        log("RESET_FEED_STATE enabled: feed baselines and transcript retry state were cleared")
     summarizer = GeminiSummarizer(settings.gemini_key, settings.gemini_model)
     log("Gemini model", settings.gemini_model)
     if transcript_settings.ytdlp_cookies:

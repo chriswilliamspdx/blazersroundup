@@ -16,8 +16,8 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 ## Behavior
 
 - The worker uses `config/feeds.youtube.yaml` by default.
-- On first run for each feed, it processes only the newest video and stores a baseline.
-- On later runs, it processes videos newer than the baseline plus any due transcript retries still visible in the channel RSS feed.
+- Each poll considers only the newest video from each configured YouTube channel.
+- Successfully handled newest videos advance that feed's baseline.
 - Transcript failures do not advance the feed baseline; the episode stays eligible for a later retry.
 - Transcript provider order is:
   1. `youtube-transcript-api`
@@ -29,10 +29,10 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 ### Posting logic
 
 - **National NBA podcasts**: post only when a Blazers mention is detected.
-  1. Post 1: YouTube episode link with timestamp and short topic, max 300 chars.
+  1. Post 1: show name and episode title, then timestamped YouTube segment link, max 300 chars.
   2. Post 2: neutral segment summary, max 300 chars.
 - **Blazers-specific podcasts**: summarize the newest episode.
-  1. Post 1: YouTube episode link and short topic, max 300 chars.
+  1. Post 1: show name and episode title, then YouTube episode link, max 300 chars.
   2. Post 2: neutral episode summary, max 300 chars.
 
 ### Formatting and constraints
@@ -67,14 +67,25 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `DRY_RUN` = 1 to log planned posts without posting or marking episodes seen
 - `DRY_RUN_RECORD_TRANSCRIPT_RETRIES` = 1 to still back off blocked transcripts during dry-run
 - `FORCE_TRANSCRIPT_RETRY` = 1 to ignore saved transcript cooldowns for one test run
+- `RESET_FEED_STATE` = 1 to clear feed baselines and transcript retry state on startup; remove after one deploy
 - `FEED_MODE` = `all`, `national`, or `blazers` (optional, use `blazers` while testing)
-- `MAX_VIDEOS_PER_FEED` = 2 (optional, lower to 1 while testing)
+- `MAX_VIDEOS_PER_FEED` = 1 (optional; the worker only considers the newest episode per feed)
 - `MAX_VIDEOS_PER_POLL` = 40 (optional, lower to 5-10 while testing)
 - `SCAN_PAUSE_SECONDS` = 2.0 (optional, increase to slow requests)
 - `TRANSCRIPT_RETRY_MINUTES` = 60 (optional)
 - `TRANSCRIPT_MAX_ATTEMPTS` = 5 (optional)
 - `TRANSCRIPT_PROXY_ENABLED` = 0 or 1 (optional)
+- `TRANSCRIPT_PROXY_SOURCES` = `swiftshadow` or `swiftshadow,1proxy` (optional)
+- `TRANSCRIPT_PROXY_ATTEMPTS` = 2 (optional)
+- `TRANSCRIPT_PROXY_TIMEOUT_SECONDS` = 10.0 (optional)
 - `SWIFTSHADOW_COUNTRIES` = `US` (optional)
+- `SWIFTSHADOW_PROTOCOL` = `https` (optional)
+- `ONEPROXY_API_URL` = `https://1proxy-api.aitradepulse.com/api/v1/proxies/advanced` (optional)
+- `ONEPROXY_COUNTRY` = `US` (optional)
+- `ONEPROXY_PROTOCOLS` = `http,https` (optional)
+- `ONEPROXY_LIMIT` = 20 (optional)
+- `ONEPROXY_MIN_QUALITY` = optional minimum quality score
+- `ONEPROXY_CAN_ACCESS_GOOGLE` = optional `1` to ask 1proxy for Google-capable proxies
 - `YTDLP_COOKIES` = optional path to cookies file
 - `YTDLP_COOKIES_TEXT` = optional private Railway variable containing a Netscape-format cookies file
 - `YTDLP_COOKIES_B64` = optional base64 version of `YTDLP_COOKIES_TEXT`

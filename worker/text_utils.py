@@ -7,7 +7,7 @@ def normalize_spaces(text: str) -> str:
 
 
 def clamp_text(text: str, limit: int = 300, suffix: str = "...") -> str:
-    text = normalize_spaces(text)
+    text = "\n".join(normalize_spaces(line) for line in str(text or "").replace("\r\n", "\n").split("\n")).strip()
     if len(text) <= limit:
         return text
     if limit <= len(suffix):
@@ -15,10 +15,27 @@ def clamp_text(text: str, limit: int = 300, suffix: str = "...") -> str:
     return text[: limit - len(suffix)].rstrip() + suffix
 
 
+def clamp_heading_with_link(heading: str, link_line: str, limit: int = 300) -> str:
+    heading = normalize_spaces(heading)
+    link_line = normalize_spaces(link_line)
+    text = f"{heading}\n{link_line}".strip()
+    if len(text) <= limit:
+        return text
+
+    if len(link_line) >= limit:
+        return clamp_text(link_line, limit)
+
+    heading_limit = limit - len(link_line) - 1
+    return f"{clamp_text(heading, heading_limit)}\n{link_line}"
+
+
 def fmt_mmss(seconds: int | float) -> str:
     seconds = int(math.floor(max(0, seconds)))
-    minutes = seconds // 60
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
     remainder = seconds % 60
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{remainder:02d}"
     return f"{minutes:02d}:{remainder:02d}"
 
 

@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "worker"))
 
-from text_utils import clamp_text, first_keyword_hit, fmt_mmss, transcript_window, youtube_link  # noqa: E402
+from text_utils import clamp_heading_with_link, clamp_text, first_keyword_hit, fmt_mmss, transcript_window, youtube_link  # noqa: E402
 
 
 class TextUtilsTests(unittest.TestCase):
@@ -21,6 +21,7 @@ class TextUtilsTests(unittest.TestCase):
         self.assertEqual(start, 65)
         self.assertEqual(text, "A Portland Trail Blazers trade idea")
         self.assertEqual(fmt_mmss(start), "01:05")
+        self.assertEqual(fmt_mmss(3786), "01:03:06")
         self.assertEqual(
             youtube_link("abc123", start),
             "https://www.youtube.com/watch?v=abc123&t=65s",
@@ -38,7 +39,14 @@ class TextUtilsTests(unittest.TestCase):
 
     def test_clamp_text(self):
         self.assertEqual(clamp_text("  one   two  ", 300), "one two")
+        self.assertEqual(clamp_text("one   two\n three   four", 300), "one two\nthree four")
         self.assertEqual(clamp_text("abcdef", 5), "ab...")
+
+    def test_clamp_heading_with_link_preserves_link_line(self):
+        text = clamp_heading_with_link("A" * 400, "01:03:06 https://example.com/watch?v=abc&t=3786s", 100)
+
+        self.assertTrue(text.endswith("01:03:06 https://example.com/watch?v=abc&t=3786s"))
+        self.assertLessEqual(len(text), 100)
 
 
 if __name__ == "__main__":

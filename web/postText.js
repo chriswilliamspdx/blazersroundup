@@ -10,7 +10,13 @@ export function graphemes(text) {
 }
 
 export function clampPostText(text, limit = DEFAULT_POST_CHAR_LIMIT) {
-  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  const clean = String(text || '')
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map(line => line.replace(/\s+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
   const parts = graphemes(clean);
   if (parts.length <= limit) return clean;
   if (limit <= 3) return '.'.repeat(limit);
