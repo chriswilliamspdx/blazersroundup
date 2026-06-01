@@ -43,6 +43,7 @@ class TranscriptSettings:
     proxy_sources: list[str] | None = None
     swiftshadow_countries: list[str] | None = None
     swiftshadow_protocol: str = "https"
+    swiftshadow_protocols: list[str] | None = None
     proxy_attempts: int = 2
     ytdlp_cookies: str | None = None
     ytdlp_extractor_clients: list[str] | None = None
@@ -53,6 +54,8 @@ class TranscriptSettings:
     oneproxy_limit: int = 20
     oneproxy_min_quality: int | None = None
     oneproxy_can_access_google: bool | None = None
+    oneproxy_strategy: str = "quality"
+    oneproxy_max_latency: int | None = None
     proxy_timeout_seconds: float = 10.0
 
 
@@ -68,6 +71,20 @@ class TranscriptError(Exception):
         super().__init__(message)
         self.error_type = error_type
         self.transient = transient
+
+
+def is_live_unavailable_message(message: str) -> bool:
+    message = (message or "").lower()
+    return any(
+        phrase in message
+        for phrase in (
+            "live event will begin",
+            "premiere will begin",
+            "premieres in",
+            "waiting for this live stream",
+            "this live stream recording is not available",
+        )
+    )
 
 
 def _clean_caption_text(text: str) -> str:
@@ -150,6 +167,8 @@ def _classify_yta_error(exc: Exception) -> TranscriptError:
         return TranscriptError(str(exc), exc.__class__.__name__, transient=False)
     if isinstance(exc, (RequestBlocked, IpBlocked)):
         return TranscriptError(str(exc), exc.__class__.__name__, transient=True)
+    if is_live_unavailable_message(str(exc)):
+        return TranscriptError(str(exc), "LiveUpcoming", transient=False)
     if isinstance(exc, CouldNotRetrieveTranscript):
         return TranscriptError(str(exc), exc.__class__.__name__, transient=True)
     return TranscriptError(str(exc), exc.__class__.__name__, transient=True)
@@ -218,6 +237,8 @@ def fetch_with_ytdlp(video_id: str, settings: TranscriptSettings, proxy_url: str
     except TranscriptError:
         raise
     except Exception as exc:
+        if is_live_unavailable_message(str(exc)):
+            raise TranscriptError(str(exc), "LiveUpcoming", transient=False) from exc
         raise TranscriptError(str(exc), exc.__class__.__name__, transient=True) from exc
 
     try:
@@ -237,19 +258,40 @@ def _normalize_proxy_url(value: str, default_scheme: str = "http") -> str | None
     return value
 
 
-def _swiftshadow_proxy_factory(settings: TranscriptSettings) -> Callable[[], str]:
+def _swiftshadow_proxy_factory(settings: TranscriptSettings) -> Callable[[], str] | None:
     from swiftshadow.classes import ProxyInterface
 
-    manager = ProxyInterface(
-        countries=settings.swiftshadow_countries or ["US"],
-        protocol=settings.swiftshadow_protocol or "https",
-        maxProxies=10,
-        autoRotate=True,
-    )
+    managers = []
+    protocols = settings.swiftshadow_protocols or [settings.swiftshadow_protocol or "https"]
+    last_error = None
+    for protocol in protocols:
+        try:
+            managers.append(
+                (
+                    protocol,
+                    ProxyInterface(
+                        countries=settings.swiftshadow_countries or ["US"],
+                        protocol=protocol,
+                        maxProxies=10,
+                        autoRotate=True,
+                    ),
+                )
+            )
+        except Exception as exc:
+            last_error = exc
+    if not managers:
+        if last_error:
+            raise last_error
+        return None
+
+    index = -1
 
     def next_proxy() -> str:
+        nonlocal index
+        index = (index + 1) % len(managers)
+        protocol, manager = managers[index]
         proxy = manager.get()
-        return _normalize_proxy_url(proxy.as_string(), default_scheme=settings.swiftshadow_protocol or "https")
+        return _normalize_proxy_url(proxy.as_string(), default_scheme=protocol)
 
     return next_proxy
 
@@ -279,10 +321,35 @@ def _oneproxy_proxy_factory(settings: TranscriptSettings) -> Callable[[], str] |
     if not settings.oneproxy_api_url:
         return None
 
+    protocols = settings.oneproxy_protocols or ["http", "https"]
+    if settings.oneproxy_api_url.rstrip("/").endswith("/rotate"):
+        index = -1
+
+        def next_proxy() -> str:
+            nonlocal index
+            index = (index + 1) % len(protocols)
+            params = {
+                "strategy": settings.oneproxy_strategy,
+                "protocol": protocols[index],
+            }
+            if settings.oneproxy_country:
+                params["country_code"] = settings.oneproxy_country
+            if settings.oneproxy_min_quality is not None:
+                params["min_quality"] = settings.oneproxy_min_quality
+            if settings.oneproxy_max_latency is not None:
+                params["max_latency"] = settings.oneproxy_max_latency
+            response = requests.get(settings.oneproxy_api_url, params=params, timeout=settings.proxy_timeout_seconds)
+            response.raise_for_status()
+            proxy_url = _proxy_url_from_oneproxy_item(response.json())
+            if not proxy_url:
+                raise TranscriptError("1proxy rotate response did not include a proxy URL", "NoProxy", transient=True)
+            return proxy_url
+
+        return next_proxy
+
     params = {"limit": settings.oneproxy_limit}
     if settings.oneproxy_country:
         params["country_code"] = settings.oneproxy_country
-    protocols = settings.oneproxy_protocols or ["http", "https"]
     if len(protocols) == 1:
         params["protocol"] = protocols[0]
     if settings.oneproxy_min_quality is not None:
@@ -414,19 +481,24 @@ def settings_from_env() -> TranscriptSettings:
     countries = [item.strip().upper() for item in os.getenv("SWIFTSHADOW_COUNTRIES", "US").split(",") if item.strip()]
     clients = [item.strip() for item in os.getenv("YTDLP_EXTRACTOR_CLIENTS", "android,web").split(",") if item.strip()]
     proxy_sources = [item.strip().lower() for item in os.getenv("TRANSCRIPT_PROXY_SOURCES", "swiftshadow").split(",") if item.strip()]
+    swiftshadow_protocols = [
+        item.strip().lower() for item in os.getenv("SWIFTSHADOW_PROTOCOLS", os.getenv("SWIFTSHADOW_PROTOCOL", "http,https")).split(",") if item.strip()
+    ]
     oneproxy_protocols = [item.strip().lower() for item in os.getenv("ONEPROXY_PROTOCOLS", "http,https").split(",") if item.strip()]
     oneproxy_min_quality = os.getenv("ONEPROXY_MIN_QUALITY")
     oneproxy_can_access_google = os.getenv("ONEPROXY_CAN_ACCESS_GOOGLE")
+    oneproxy_max_latency = os.getenv("ONEPROXY_MAX_LATENCY")
     return TranscriptSettings(
         proxy_enabled=os.getenv("TRANSCRIPT_PROXY_ENABLED", "0") == "1",
         proxy_sources=proxy_sources or ["swiftshadow"],
         swiftshadow_countries=countries or ["US"],
-        swiftshadow_protocol=os.getenv("SWIFTSHADOW_PROTOCOL", "https").lower(),
+        swiftshadow_protocol=os.getenv("SWIFTSHADOW_PROTOCOL", swiftshadow_protocols[0] if swiftshadow_protocols else "http").lower(),
+        swiftshadow_protocols=swiftshadow_protocols or ["http", "https"],
         proxy_attempts=int(os.getenv("TRANSCRIPT_PROXY_ATTEMPTS", "2")),
         ytdlp_cookies=cookiefile_from_env(),
         ytdlp_extractor_clients=clients or ["android", "web"],
         ytdlp_sleep_requests=float(os.getenv("YTDLP_SLEEP_REQUESTS", "1.0")),
-        oneproxy_api_url=os.getenv("ONEPROXY_API_URL", "https://1proxy-api.aitradepulse.com/api/v1/proxies/advanced"),
+        oneproxy_api_url=os.getenv("ONEPROXY_API_URL", "https://1proxy-api.aitradepulse.com/api/v1/proxies/rotate"),
         oneproxy_country=os.getenv("ONEPROXY_COUNTRY", "US") or None,
         oneproxy_protocols=oneproxy_protocols or ["http", "https"],
         oneproxy_limit=int(os.getenv("ONEPROXY_LIMIT", "20")),
@@ -436,5 +508,7 @@ def settings_from_env() -> TranscriptSettings:
             if oneproxy_can_access_google is None
             else oneproxy_can_access_google.strip().lower() in ("1", "true", "yes")
         ),
+        oneproxy_strategy=os.getenv("ONEPROXY_STRATEGY", "quality"),
+        oneproxy_max_latency=int(oneproxy_max_latency) if oneproxy_max_latency else None,
         proxy_timeout_seconds=float(os.getenv("TRANSCRIPT_PROXY_TIMEOUT_SECONDS", "10.0")),
     )

@@ -17,12 +17,13 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 
 - The worker uses `config/feeds.youtube.yaml` by default.
 - Each poll considers only the newest video from each configured YouTube channel.
+- If the newest YouTube entry is an upcoming live event, the worker skips it and tries the next newest entry from that channel.
 - Successfully handled newest videos advance that feed's baseline.
 - Transcript failures do not advance the feed baseline; the episode stays eligible for a later retry.
 - Transcript provider order is:
   1. `youtube-transcript-api`
   2. `yt-dlp` caption-only fallback (`skip_download=True`)
-  3. Optional SwiftShadow free-proxy retry when `TRANSCRIPT_PROXY_ENABLED=1`
+  3. Optional rotating proxy retry when `TRANSCRIPT_PROXY_ENABLED=1`
 - No audio or video files are downloaded.
 - Dedupe is tracked by RSS `guid` and YouTube video ID in Postgres.
 
@@ -70,6 +71,7 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `RESET_FEED_STATE` = 1 to clear feed baselines and transcript retry state on startup; remove after one deploy
 - `FEED_MODE` = `all`, `national`, or `blazers` (optional, use `blazers` while testing)
 - `MAX_VIDEOS_PER_FEED` = 1 (optional; the worker only considers the newest episode per feed)
+- `MAX_FEED_CANDIDATE_FALLBACKS` = 5 (optional; only used to step past upcoming live videos)
 - `MAX_VIDEOS_PER_POLL` = 40 (optional, lower to 5-10 while testing)
 - `SCAN_PAUSE_SECONDS` = 2.0 (optional, increase to slow requests)
 - `TRANSCRIPT_RETRY_MINUTES` = 60 (optional)
@@ -79,13 +81,15 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `TRANSCRIPT_PROXY_ATTEMPTS` = 2 (optional)
 - `TRANSCRIPT_PROXY_TIMEOUT_SECONDS` = 10.0 (optional)
 - `SWIFTSHADOW_COUNTRIES` = `US` (optional)
-- `SWIFTSHADOW_PROTOCOL` = `https` (optional)
-- `ONEPROXY_API_URL` = `https://1proxy-api.aitradepulse.com/api/v1/proxies/advanced` (optional)
+- `SWIFTSHADOW_PROTOCOLS` = `http,https` (optional)
+- `ONEPROXY_API_URL` = `https://1proxy-api.aitradepulse.com/api/v1/proxies/rotate` (optional)
 - `ONEPROXY_COUNTRY` = `US` (optional)
 - `ONEPROXY_PROTOCOLS` = `http,https` (optional)
 - `ONEPROXY_LIMIT` = 20 (optional)
 - `ONEPROXY_MIN_QUALITY` = optional minimum quality score
 - `ONEPROXY_CAN_ACCESS_GOOGLE` = optional `1` to ask 1proxy for Google-capable proxies
+- `ONEPROXY_STRATEGY` = `quality` (optional)
+- `ONEPROXY_MAX_LATENCY` = optional maximum proxy latency in milliseconds
 - `YTDLP_COOKIES` = optional path to cookies file
 - `YTDLP_COOKIES_TEXT` = optional private Railway variable containing a Netscape-format cookies file
 - `YTDLP_COOKIES_B64` = optional base64 version of `YTDLP_COOKIES_TEXT`
