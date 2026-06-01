@@ -61,6 +61,7 @@ class WorkerSettings:
     transcript_retry_minutes: int
     transcript_max_attempts: int
     max_videos_per_feed: int
+    max_feed_candidate_fallbacks: int
     max_videos_per_poll: int
 
     @classmethod
@@ -88,6 +89,7 @@ class WorkerSettings:
             transcript_retry_minutes=int(os.getenv("TRANSCRIPT_RETRY_MINUTES", "60")),
             transcript_max_attempts=int(os.getenv("TRANSCRIPT_MAX_ATTEMPTS", "5")),
             max_videos_per_feed=int(os.getenv("MAX_VIDEOS_PER_FEED", "1")),
+            max_feed_candidate_fallbacks=int(os.getenv("MAX_FEED_CANDIDATE_FALLBACKS", "5")),
             max_videos_per_poll=int(os.getenv("MAX_VIDEOS_PER_POLL", "40")),
         )
 
@@ -346,6 +348,12 @@ def build_summary_prompt(exclude_note: str) -> str:
     )
 
 
+VIDEO_OK = "ok"
+VIDEO_RETRY_LATER = "retry_later"
+VIDEO_SKIP_CANDIDATE = "skip_candidate"
+VIDEO_POST_FAILED = "post_failed"
+
+
 def handle_video(
     settings: WorkerSettings,
     db: Database,
@@ -357,7 +365,7 @@ def handle_video(
     mode: str,
     entry,
     video_id: str,
-) -> bool:
+) -> str:
     guid = entry.get("id") or entry.get("link") or video_id
     published_at = parse_pubdate(entry)
     title = (entry.get("title") or "").strip()
@@ -366,10 +374,10 @@ def handle_video(
 
     if db.already_seen(feed_url, guid, video_id):
         dlog(settings, "skip: already seen", video_id)
-        return True
+        return VIDEO_OK
     if not settings.force_transcript_retry and not db.transcript_retry_ready(video_id, settings.transcript_max_attempts):
         dlog(settings, "skip: transcript retry not due", video_id)
-        return False
+        return VIDEO_RETRY_LATER
     if settings.force_transcript_retry:
         dlog(settings, "force transcript retry", video_id)
 
@@ -378,6 +386,9 @@ def handle_video(
         if not settings.dry_run:
             db.record_transcript_success(video_id)
     except TranscriptError as exc:
+        if exc.error_type == "LiveUpcoming":
+            log("skip upcoming live video", video_id)
+            return VIDEO_SKIP_CANDIDATE
         if exc.transient:
             log("transient transcript failure", video_id, exc.error_type)
             if not settings.dry_run or settings.dry_run_record_transcript_retries:
@@ -388,10 +399,10 @@ def handle_video(
                     settings.transcript_max_attempts,
                 )
                 log("transcript retry scheduled", video_id, "attempts", attempts, "next", retry_at)
-            return False
+            return VIDEO_RETRY_LATER
         log("permanent transcript failure", video_id, exc.error_type)
         maybe_mark_seen(settings, db, feed_url, guid, video_id, published_at)
-        return True
+        return VIDEO_OK
 
     start_seconds, _matched_text = first_keyword_hit(result.segments, keywords)
     if mode == "blazers":
@@ -402,7 +413,7 @@ def handle_video(
     elif start_seconds is None:
         dlog(settings, "no direct keyword hit", video_id, mode)
         maybe_mark_seen(settings, db, feed_url, guid, video_id, published_at)
-        return True
+        return VIDEO_OK
     else:
         snippet = transcript_window(result.segments, start_seconds, window_seconds=180, char_limit=8000)
         jump_seconds = start_seconds
@@ -412,7 +423,7 @@ def handle_video(
     if not output.get("is_blazers"):
         dlog(settings, "gemini says not blazers", video_id)
         maybe_mark_seen(settings, db, feed_url, guid, video_id, published_at)
-        return True
+        return VIDEO_OK
 
     link = youtube_link(video_id, jump_seconds)
     title_part = title or "New podcast episode"
@@ -429,10 +440,10 @@ def handle_video(
         clamp_text(second_text, post_char_limit),
     )
     if not posted:
-        return False
+        return VIDEO_POST_FAILED
 
     maybe_mark_seen(settings, db, feed_url, guid, video_id, published_at)
-    return True
+    return VIDEO_OK
 
 
 def process_channel(
@@ -460,25 +471,37 @@ def process_channel(
         dlog(settings, "feed has no parseable video ids", feed_url)
         return
 
-    newest_pub = rows[0][0]
     baseline = db.get_feed_baseline(feed_url)
     latest = rows[0]
     latest_pub, _latest_entry, latest_video_id = latest
     if baseline is None or latest_pub > baseline or db.has_due_transcript_retry(latest_video_id, settings.transcript_max_attempts):
-        candidates = [latest]
+        candidates = [
+            row
+            for row in rows[: settings.max_feed_candidate_fallbacks]
+            if baseline is None or row[0] > baseline or row[2] == latest_video_id
+        ]
     else:
         candidates = []
 
     dlog(settings, "candidates", len(candidates), "baseline", baseline.isoformat() if baseline else None)
     all_posting_ok = True
     processed = 0
-    for published_at, entry, video_id in candidates[: settings.max_videos_per_feed]:
-        ok = handle_video(settings, db, summarizer, config, transcript_settings, feed_url, show_name, mode, entry, video_id)
-        all_posting_ok = all_posting_ok and ok
+    newest_completed_pub = None
+    for published_at, entry, video_id in candidates:
+        if processed >= settings.max_videos_per_feed:
+            break
+        outcome = handle_video(settings, db, summarizer, config, transcript_settings, feed_url, show_name, mode, entry, video_id)
+        if outcome == VIDEO_SKIP_CANDIDATE:
+            continue
         processed += 1
+        if outcome == VIDEO_OK:
+            newest_completed_pub = published_at if newest_completed_pub is None else max(newest_completed_pub, published_at)
+        else:
+            all_posting_ok = False
+        break
 
-    if not settings.dry_run and all_posting_ok and (baseline is None or newest_pub > baseline):
-        db.set_feed_baseline(feed_url, newest_pub)
+    if not settings.dry_run and all_posting_ok and newest_completed_pub and (baseline is None or newest_completed_pub > baseline):
+        db.set_feed_baseline(feed_url, newest_completed_pub)
     return processed
 
 
