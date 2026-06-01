@@ -27,6 +27,25 @@ class TextUtilsTests(unittest.TestCase):
             "https://www.youtube.com/watch?v=abc123&t=65s",
         )
 
+    def test_fuzzy_name_detection_handles_transcript_misspellings(self):
+        segments = [
+            (12.0, 2.0, "They talked about Shaydon Sharp attacking closeouts."),
+            (30.0, 2.0, "No other Portland context."),
+        ]
+
+        start, text = first_keyword_hit(segments, ["shaedon sharpe"])
+
+        self.assertEqual(start, 12)
+        self.assertIn("Shaydon Sharp", text)
+
+    def test_fuzzy_detection_does_not_apply_to_single_words(self):
+        segments = [(40.0, 2.0, "The window glazers were mentioned.")]
+
+        start, text = first_keyword_hit(segments, ["blazers"])
+
+        self.assertIsNone(start)
+        self.assertIsNone(text)
+
     def test_transcript_window(self):
         segments = [
             (0, 1, "before"),
