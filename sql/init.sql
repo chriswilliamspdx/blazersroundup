@@ -30,6 +30,15 @@ create table if not exists transcript_attempts (
   next_retry_at timestamptz
 );
 
+-- Gemini retry/backoff state for summary generation failures.
+create table if not exists summary_attempts (
+  video_id text primary key,
+  last_attempt_at timestamptz not null default now(),
+  attempt_count integer not null default 0,
+  last_error_type text,
+  next_retry_at timestamptz
+);
+
 -- OAuth session for the bot web service.
 create table if not exists oauth_sessions (
   sub text primary key,
