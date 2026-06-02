@@ -19,10 +19,9 @@ from psycopg2.extras import RealDictCursor
 from retry import next_retry_at_for_attempt, transcript_retry_due
 from text_utils import (
     build_model_input,
-    clamp_heading_with_link,
     clamp_text,
     first_keyword_hit,
-    fmt_mmss,
+    fmt_hhmmss,
     transcript_window,
     youtube_link,
 )
@@ -30,6 +29,9 @@ from transcript_providers import TranscriptError, fetch_transcript, settings_fro
 
 
 UTC = tz.UTC
+YOUTUBE_FEED_USER_AGENT = (
+    "Mozilla/5.0 (compatible; BlazersRoundupBot/1.0; +https://github.com/chriswilliamspdx/blazersroundup)"
+)
 
 
 def log(*args):
@@ -65,6 +67,7 @@ class WorkerSettings:
     max_videos_per_feed: int
     max_feed_candidate_fallbacks: int
     max_videos_per_poll: int
+    summary_post_char_limit: int
     llm_max_calls_per_poll: int
     llm_retry_minutes: int
     llm_max_attempts: int
@@ -99,6 +102,7 @@ class WorkerSettings:
             max_videos_per_feed=int(os.getenv("MAX_VIDEOS_PER_FEED", "1")),
             max_feed_candidate_fallbacks=int(os.getenv("MAX_FEED_CANDIDATE_FALLBACKS", "5")),
             max_videos_per_poll=int(os.getenv("MAX_VIDEOS_PER_POLL", "40")),
+            summary_post_char_limit=int(os.getenv("SUMMARY_POST_CHAR_LIMIT", "250")),
             llm_max_calls_per_poll=int(os.getenv("LLM_MAX_CALLS_PER_POLL", "10")),
             llm_retry_minutes=int(os.getenv("LLM_RETRY_MINUTES", "60")),
             llm_max_attempts=int(os.getenv("LLM_MAX_ATTEMPTS", "5")),
@@ -512,16 +516,98 @@ def build_rows(entries):
     return rows
 
 
-def create_thread(settings: WorkerSettings, first_text: str, second_text: str) -> bool:
+def fetch_youtube_feed(settings: WorkerSettings, feed_url: str):
+    headers = {
+        "User-Agent": YOUTUBE_FEED_USER_AGENT,
+        "Accept": "application/atom+xml, application/xml, text/xml, */*",
+    }
+    last_parsed = None
+    last_error = None
+    last_meta = {
+        "status": None,
+        "bytes": 0,
+        "attempt": 0,
+        "bozo": False,
+        "error": None,
+    }
+    for attempt in range(2):
+        try:
+            response = requests.get(feed_url, headers=headers, timeout=15)
+            parsed = feedparser.parse(response.content)
+            last_parsed = parsed
+            last_meta = {
+                "status": response.status_code,
+                "bytes": len(response.content),
+                "attempt": attempt + 1,
+                "bozo": bool(getattr(parsed, "bozo", False)),
+                "error": str(getattr(parsed, "bozo_exception", "") or "") or None,
+            }
+            entries = list(parsed.entries)
+            if entries:
+                return parsed, last_meta
+            dlog(
+                settings,
+                "feed empty",
+                feed_url,
+                "attempt",
+                attempt + 1,
+                "status",
+                response.status_code,
+                "bytes",
+                len(response.content),
+                "bozo",
+                bool(getattr(parsed, "bozo", False)),
+                "error",
+                getattr(parsed, "bozo_exception", "") or "",
+            )
+        except Exception as exc:
+            last_error = exc
+            last_meta = {
+                "status": None,
+                "bytes": 0,
+                "attempt": attempt + 1,
+                "bozo": False,
+                "error": f"{exc.__class__.__name__}: {exc}",
+            }
+            dlog(settings, "feed fetch failed", feed_url, "attempt", attempt + 1, exc.__class__.__name__, str(exc))
+        if attempt == 0:
+            time.sleep(1)
+
+    if last_error and not last_meta.get("error"):
+        last_meta["error"] = f"{last_error.__class__.__name__}: {last_error}"
+    return last_parsed or feedparser.parse(b""), last_meta
+
+
+def create_thread(
+    settings: WorkerSettings,
+    first_text: str,
+    second_text: str,
+    first_embed_url: str | None = None,
+    first_embed_title: str | None = None,
+    first_embed_description: str | None = None,
+) -> bool:
     if settings.dry_run:
         log("DRY_RUN post 1:", first_text)
+        if first_embed_url:
+            log("DRY_RUN embed:", first_embed_url)
         log("DRY_RUN post 2:", second_text)
         return True
+
+    payload = {
+        "firstText": first_text,
+        "secondText": second_text,
+    }
+    if first_embed_url:
+        payload["firstEmbed"] = {
+            "uri": first_embed_url,
+            "title": first_embed_title or "",
+            "description": first_embed_description or "",
+        }
 
     response = requests.post(
         f"{settings.web_base_url}/post-thread",
         headers={"Content-Type": "application/json", "X-Internal-Token": settings.internal_api_token},
-        data=json.dumps({"firstText": first_text, "secondText": second_text}),
+        data=json.dumps(payload),
         timeout=60,
     )
     if response.status_code != 200:
@@ -537,7 +623,7 @@ def maybe_mark_seen(settings: WorkerSettings, db: Database, feed_url, guid, medi
     db.mark_seen(feed_url, guid, media_id, published_at)
 
 
-def build_summary_prompt(exclude_note: str) -> str:
+def build_summary_prompt(exclude_note: str, summary_limit: int = 250) -> str:
     return (
         "You will be given podcast metadata and a snippet from a transcript. "
         "Decide if it is about the NBA team the Portland Trail Blazers, including players, coaches, "
@@ -549,12 +635,13 @@ def build_summary_prompt(exclude_note: str) -> str:
         "supports that conclusion. "
         f"{exclude_note}\n\n"
         "Return JSON with fields: is_blazers (boolean), topic (short string), "
-        "summary (<=300 chars, neutral tone)."
+        f"summary (<={summary_limit} chars, neutral tone)."
     )
 
 
 VIDEO_OK = "ok"
 VIDEO_RETRY_LATER = "retry_later"
+VIDEO_NOT_DUE = "not_due"
 VIDEO_SKIP_CANDIDATE = "skip_candidate"
 VIDEO_POST_FAILED = "post_failed"
 
@@ -593,10 +680,10 @@ def handle_video(
         return VIDEO_RETRY_LATER
     if not db.summary_retry_ready(video_id, settings.llm_max_attempts):
         dlog(settings, "skip: Gemini retry not due", video_id)
-        return VIDEO_RETRY_LATER
+        return VIDEO_NOT_DUE
     if not settings.force_transcript_retry and not db.transcript_retry_ready(video_id, settings.transcript_max_attempts):
         dlog(settings, "skip: transcript retry not due", video_id)
-        return VIDEO_RETRY_LATER
+        return VIDEO_NOT_DUE
     if settings.force_transcript_retry:
         dlog(settings, "force transcript retry", video_id)
 
@@ -649,7 +736,10 @@ def handle_video(
         video_id,
     )
     try:
-        output = summarizer.summarize_json(build_summary_prompt(config.get("exclude_note", "")), model_input)
+        output = summarizer.summarize_json(
+            build_summary_prompt(config.get("exclude_note", ""), settings.summary_post_char_limit),
+            model_input,
+        )
         db.record_summary_success(video_id)
     except LLMQuotaError as exc:
         cooldown_until = db.set_llm_cooldown(exc.cooldown_until, exc.error_type)
@@ -683,15 +773,19 @@ def handle_video(
     title_part = title or "New podcast episode"
     heading = f"{show_name} - {title_part}" if show_name else title_part
     if mode == "national":
-        first_text = clamp_heading_with_link(heading, f"{fmt_mmss(jump_seconds)} {link}", post_char_limit)
+        timestamp = fmt_hhmmss(jump_seconds)
+        first_text = f"{link}\nBlazers conversation starts at {timestamp}. Video link timestamped."
     else:
-        first_text = clamp_heading_with_link(heading, youtube_link(video_id), post_char_limit)
+        first_text = youtube_link(video_id)
     second_text = (output.get("summary") or "").strip()
 
     posted = create_thread(
         settings,
         clamp_text(first_text, post_char_limit),
-        clamp_text(second_text, post_char_limit),
+        clamp_text(second_text, settings.summary_post_char_limit),
+        first_embed_url=link,
+        first_embed_title=heading,
+        first_embed_description=show_name or "YouTube video",
     )
     if not posted:
         return VIDEO_POST_FAILED
@@ -715,9 +809,21 @@ def process_channel(
     if show_name.lower().startswith(("http://", "https://")):
         show_name = ""
     feed_url = yt_channel_feed_url(channel_id)
-    parsed = feedparser.parse(feed_url)
+    parsed, feed_meta = fetch_youtube_feed(settings, feed_url)
     entries = list(parsed.entries)
-    dlog(settings, "feed", feed_url, "entries", len(entries))
+    dlog(
+        settings,
+        "feed",
+        feed_url,
+        "entries",
+        len(entries),
+        "status",
+        feed_meta.get("status"),
+        "bytes",
+        feed_meta.get("bytes"),
+        "attempt",
+        feed_meta.get("attempt"),
+    )
     if not entries:
         return
 
@@ -762,6 +868,9 @@ def process_channel(
         )
         if outcome == VIDEO_SKIP_CANDIDATE:
             continue
+        if outcome == VIDEO_NOT_DUE:
+            all_posting_ok = False
+            break
         processed += 1
         if outcome == VIDEO_OK:
             newest_completed_pub = published_at if newest_completed_pub is None else max(newest_completed_pub, published_at)
