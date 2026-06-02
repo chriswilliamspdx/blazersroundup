@@ -122,12 +122,102 @@ const app = express();
 app.use(express.json());
 
 const postCharLimit = Number.parseInt(POST_CHAR_LIMIT, 10) || 300;
+const embedThumbMaxBytes = 1_000_000;
 
 app.get('/', (_req, res) => res.type('text/plain').send('ok'));
 
 async function sessionStatus() {
   const row = await pg.query(`SELECT sub, updated_at FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
   return { haveSession: row.rowCount > 0, session: row.rows[0] || null };
+}
+
+function cleanCardText(value, fallback = '') {
+  return String(value || fallback)
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 300);
+}
+
+function parseYouTubeVideoId(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname === 'youtu.be') return parsed.pathname.split('/').filter(Boolean)[0] || null;
+    if (parsed.hostname.endsWith('youtube.com')) return parsed.searchParams.get('v');
+  } catch {}
+  return null;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function uploadThumbnailBlob(agent, thumbnailUrl) {
+  if (!thumbnailUrl) return null;
+  const response = await fetchWithTimeout(thumbnailUrl, {}, 10000);
+  if (!response.ok) throw new Error(`thumbnail fetch failed: ${response.status}`);
+
+  const contentType = response.headers.get('content-type') || 'image/jpeg';
+  if (!contentType.startsWith('image/')) throw new Error(`thumbnail was not an image: ${contentType}`);
+
+  const contentLength = Number.parseInt(response.headers.get('content-length') || '0', 10);
+  if (contentLength > embedThumbMaxBytes) throw new Error(`thumbnail too large: ${contentLength}`);
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > embedThumbMaxBytes) throw new Error(`thumbnail too large: ${bytes.byteLength}`);
+
+  const { data } = await agent.uploadBlob(bytes, { encoding: contentType });
+  return data.blob;
+}
+
+async function buildExternalEmbed(agent, embedRequest) {
+  const uri = cleanCardText(embedRequest?.uri);
+  if (!uri || !uri.startsWith('https://')) return null;
+
+  const card = {
+    uri,
+    title: cleanCardText(embedRequest?.title, 'YouTube video'),
+    description: cleanCardText(embedRequest?.description, 'YouTube'),
+  };
+
+  let thumbnailUrl = null;
+  try {
+    const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(uri)}&format=json`;
+    const response = await fetchWithTimeout(oembedUrl, {}, 10000);
+    if (response.ok) {
+      const data = await response.json();
+      card.title = cleanCardText(data.title, card.title);
+      card.description = cleanCardText(
+        data.author_name ? `YouTube video by ${data.author_name}` : card.description,
+        card.description,
+      );
+      thumbnailUrl = data.thumbnail_url || null;
+    }
+  } catch (err) {
+    console.warn('[post-thread] YouTube oEmbed failed:', err.message);
+  }
+
+  if (!thumbnailUrl) {
+    const videoId = parseYouTubeVideoId(uri);
+    if (videoId) thumbnailUrl = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+  }
+
+  try {
+    const thumb = await uploadThumbnailBlob(agent, thumbnailUrl);
+    if (thumb) card.thumb = thumb;
+  } catch (err) {
+    console.warn('[post-thread] thumbnail upload failed:', err.message);
+  }
+
+  return {
+    $type: 'app.bsky.embed.external',
+    external: card,
+  };
 }
 
 app.get('/session/status', async (_req, res) => {
@@ -177,7 +267,7 @@ app.post('/post-thread', async (req, res, next) => {
     const token = req.get('X-Internal-Token') || '';
     if (token !== INTERNAL_API_TOKEN) return res.status(403).json({ error: 'forbidden' });
 
-    const { firstText, secondText } = req.body;
+    const { firstText, secondText, firstEmbed } = req.body;
     if (!firstText || !secondText) {
       return res.status(400).json({ error: 'missing firstText or secondText' });
     }
@@ -194,7 +284,8 @@ app.post('/post-thread', async (req, res, next) => {
     }
 
     const agent = new Agent(oauthSession);
-    const firstPost = await agent.post(buildPost(firstText, undefined, postCharLimit));
+    const embed = firstEmbed ? await buildExternalEmbed(agent, firstEmbed) : null;
+    const firstPost = await agent.post(buildPost(firstText, undefined, postCharLimit, embed));
     await agent.post(buildPost(secondText, { root: firstPost, parent: firstPost }, postCharLimit));
 
     return res.json({ ok: true });

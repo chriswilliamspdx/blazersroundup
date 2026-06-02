@@ -32,16 +32,17 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 ### Posting logic
 
 - **National NBA podcasts**: post only when a Blazers mention is detected.
-  1. Post 1: show name and episode title, then timestamped YouTube segment link, max 300 chars.
-  2. Post 2: neutral segment summary, max 300 chars.
+  1. Post 1: timestamped YouTube segment link first, plus "Blazers conversation starts at HH:MM:SS. Video link timestamped."
+  2. Post 2: neutral segment summary, max 250 chars by default.
 - **Blazers-specific podcasts**: summarize the newest episode.
-  1. Post 1: show name and episode title, then YouTube episode link, max 300 chars.
-  2. Post 2: neutral episode summary, max 300 chars.
+  1. Post 1: YouTube episode link first, with a YouTube external card embed.
+  2. Post 2: neutral episode summary, max 250 chars by default.
 
 ### Formatting and constraints
 
 - Neutral tone, no emojis, no hashtags.
 - Link facets are applied by `web`; replies use `reply.root` and `reply.parent` to form a thread.
+- The first post can include a YouTube external embed card with an uploaded thumbnail.
 - `web` enforces Bluesky's 300 grapheme post limit before posting.
 
 ## Environment (Railway)
@@ -81,6 +82,7 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `MAX_VIDEOS_PER_FEED` = 1 (optional; the worker only considers the newest episode per feed)
 - `MAX_FEED_CANDIDATE_FALLBACKS` = 5 (optional; only used to step past upcoming live videos)
 - `MAX_VIDEOS_PER_POLL` = 40 (optional, lower to 5-10 while testing)
+- `SUMMARY_POST_CHAR_LIMIT` = 250 (optional)
 - `SCAN_PAUSE_SECONDS` = 2.0 (optional, increase to slow requests)
 - `TRANSCRIPT_RETRY_MINUTES` = 60 (optional)
 - `TRANSCRIPT_MAX_ATTEMPTS` = 5 (optional)

@@ -52,11 +52,12 @@ export function parseUrlFacets(text) {
   return facets;
 }
 
-export function buildPost(text, reply, limit = DEFAULT_POST_CHAR_LIMIT) {
+export function buildPost(text, reply, limit = DEFAULT_POST_CHAR_LIMIT, embed) {
   const safeText = clampPostText(text, limit);
   const post = { text: safeText };
   const facets = parseUrlFacets(safeText);
   if (facets.length) post.facets = facets;
   if (reply) post.reply = reply;
+  if (embed) post.embed = embed;
   return post;
 }

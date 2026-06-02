@@ -28,3 +28,18 @@ test('preserves intentional line breaks', () => {
 
   assert.equal(post.text, 'Show Name\n01:03:06 https://example.com/watch');
 });
+
+test('attaches external embeds when provided', () => {
+  const embed = {
+    $type: 'app.bsky.embed.external',
+    external: {
+      uri: 'https://www.youtube.com/watch?v=abc123',
+      title: 'Video title',
+      description: 'YouTube',
+    },
+  };
+
+  const post = buildPost('https://www.youtube.com/watch?v=abc123', undefined, 300, embed);
+
+  assert.equal(post.embed, embed);
+});
