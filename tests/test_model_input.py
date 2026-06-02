@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "worker"))
 
 from text_utils import build_model_input  # noqa: E402
-from main import youtube_api_item_to_entry, youtube_uploads_playlist_id  # noqa: E402
+from main_youtube_api import youtube_api_item_to_entry, youtube_uploads_playlist_id  # noqa: E402
 
 
 class ModelInputTests(unittest.TestCase):
