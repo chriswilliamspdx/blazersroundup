@@ -20,4 +20,4 @@ ENV PYTHONUNBUFFERED=1
 # FEEDS_PATH lets us point main.py at the YouTube-only config
 ENV FEEDS_PATH=/app/config/feeds.youtube.yaml
 
-CMD ["python", "/app/worker/main.py"]
+CMD ["python", "/app/worker/main_youtube_api.py"]
