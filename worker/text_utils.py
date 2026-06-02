@@ -40,6 +40,14 @@ def fmt_mmss(seconds: int | float) -> str:
     return f"{minutes:02d}:{remainder:02d}"
 
 
+def fmt_hhmmss(seconds: int | float) -> str:
+    seconds = int(math.floor(max(0, seconds)))
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    remainder = seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{remainder:02d}"
+
+
 def _normalize_for_match(text: str) -> str:
     text = unicodedata.normalize("NFKD", text or "")
     text = "".join(char for char in text if not unicodedata.combining(char))
