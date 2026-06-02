@@ -38,6 +38,16 @@ except ModuleNotFoundError as exc:
 LANGUAGE_PRIORITY = ["en", "en-US", "en-GB"]
 CAPTION_FORMAT_PRIORITY = ["json3", "vtt"]
 COOKIE_FILE_PATH = os.path.join(tempfile.gettempdir(), "ytdlp-cookies.txt")
+MISSING_TRANSCRIPT_ERROR_TYPES = {
+    "NoTranscriptFound",
+    "TranscriptsDisabled",
+    "NoCaptionTrack",
+    "empty_transcript",
+}
+BLOCKED_TRANSCRIPT_ERROR_TYPES = {
+    "RequestBlocked",
+    "IpBlocked",
+}
 DEFAULT_PROXY_LIST_URLS = [
     "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt",
     "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
@@ -570,6 +580,15 @@ def fetch_transcript(video_id: str, settings: TranscriptSettings, log: Callable[
                 raise exc
 
     if settings.proxy_enabled:
+        has_missing_transcript_signal = any(error.error_type in MISSING_TRANSCRIPT_ERROR_TYPES for error in errors)
+        has_blocked_transcript_signal = any(error.error_type in BLOCKED_TRANSCRIPT_ERROR_TYPES for error in errors)
+        if has_missing_transcript_signal and not has_blocked_transcript_signal:
+            raise TranscriptError(
+                "transcript captions are missing or not ready yet",
+                "TranscriptNotReadyOrDisabled",
+                transient=True,
+            )
+
         proxy_factories = []
         for source in settings.proxy_sources or ["swiftshadow"]:
             source = source.strip().lower()
