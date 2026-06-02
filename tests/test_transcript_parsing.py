@@ -7,7 +7,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "worker"))
 
-from transcript_providers import cookiefile_from_env, parse_json3_to_segments, parse_vtt_to_segments  # noqa: E402
+from transcript_providers import (  # noqa: E402
+    _candidate_proxy_tokens,
+    _proxy_from_raw_list_token,
+    cookiefile_from_env,
+    parse_json3_to_segments,
+    parse_vtt_to_segments,
+)
 
 
 class TranscriptParsingTests(unittest.TestCase):
@@ -77,6 +83,30 @@ Trail Blazers segment starts
                 os.environ["YTDLP_COOKIES_B64"] = original_b64
             else:
                 os.environ.pop("YTDLP_COOKIES_B64", None)
+
+    def test_raw_proxy_tokens_are_split_from_public_lists(self):
+        body = """# comments are ignored
+http://1.2.3.4:8080 5.6.7.8:3128
+https://proxy.example.com:443, socks5://9.9.9.9:1080 garbage
+"""
+
+        self.assertEqual(
+            _candidate_proxy_tokens(body),
+            [
+                "http://1.2.3.4:8080",
+                "5.6.7.8:3128",
+                "https://proxy.example.com:443",
+                "socks5://9.9.9.9:1080",
+                "garbage",
+            ],
+        )
+
+    def test_raw_proxy_parser_keeps_supported_http_proxies(self):
+        self.assertEqual(_proxy_from_raw_list_token("1.2.3.4:8080"), "http://1.2.3.4:8080")
+        self.assertEqual(_proxy_from_raw_list_token("https://proxy.example.com:443"), "https://proxy.example.com:443")
+        self.assertIsNone(_proxy_from_raw_list_token("socks5://9.9.9.9:1080"))
+        self.assertIsNone(_proxy_from_raw_list_token("not-a-proxy"))
+        self.assertIsNone(_proxy_from_raw_list_token("1.2.3.4:99999"))
 
 
 if __name__ == "__main__":
