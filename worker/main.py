@@ -50,6 +50,7 @@ class WorkerSettings:
     internal_api_token: str
     gemini_key: str
     gemini_model: str
+    youtube_api_key: str | None
     feeds_paths: list[str]
     poll_interval_seconds: int
     timezone: str
@@ -82,6 +83,7 @@ class WorkerSettings:
             internal_api_token=os.environ["INTERNAL_API_TOKEN"],
             gemini_key=os.getenv("GOOGLE_API_KEY") or os.environ["GEMINI_API_KEY"],
             gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
+            youtube_api_key=os.getenv("YOUTUBE_API_KEY") or os.getenv("YOUTUBE_DATA_API_KEY"),
             feeds_paths=[
                 os.getenv("FEEDS_PATH", "/app/config/feeds.youtube.yaml"),
                 "/app/config/feeds.yaml",
@@ -481,6 +483,32 @@ def yt_channel_feed_url(channel_id: str) -> str:
     return f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
 
 
+def youtube_uploads_playlist_id(channel_id: str) -> str | None:
+    channel_id = (channel_id or "").strip()
+    if not channel_id.startswith("UC") or len(channel_id) < 3:
+        return None
+    return "UU" + channel_id[2:]
+
+
+def youtube_api_item_to_entry(item: dict) -> dict | None:
+    snippet = item.get("snippet") or {}
+    content_details = item.get("contentDetails") or {}
+    resource_id = snippet.get("resourceId") or {}
+    video_id = content_details.get("videoId") or resource_id.get("videoId")
+    if not video_id:
+        return None
+
+    published = content_details.get("videoPublishedAt") or snippet.get("publishedAt") or datetime.now(UTC).isoformat()
+    title = snippet.get("title") or "Untitled YouTube video"
+    return {
+        "id": f"yt:video:{video_id}",
+        "yt_videoid": video_id,
+        "link": youtube_link(video_id),
+        "title": title,
+        "published": published,
+    }
+
+
 def parse_youtube_video_id(entry) -> str | None:
     video_id = entry.get("yt_videoid")
     if video_id:
@@ -576,6 +604,44 @@ def fetch_youtube_feed(settings: WorkerSettings, feed_url: str):
     if last_error and not last_meta.get("error"):
         last_meta["error"] = f"{last_error.__class__.__name__}: {last_error}"
     return last_parsed or feedparser.parse(b""), last_meta
+
+
+def fetch_youtube_api_entries(settings: WorkerSettings, channel_id: str, max_results: int):
+    if not settings.youtube_api_key:
+        dlog(settings, "YouTube API fallback unavailable: missing YOUTUBE_API_KEY")
+        return [], {"status": None, "items": 0, "error": "missing_api_key"}
+
+    playlist_id = youtube_uploads_playlist_id(channel_id)
+    if not playlist_id:
+        dlog(settings, "YouTube API fallback unavailable: unsupported channel id", channel_id)
+        return [], {"status": None, "items": 0, "error": "unsupported_channel_id"}
+
+    params = {
+        "part": "snippet,contentDetails",
+        "playlistId": playlist_id,
+        "maxResults": max(1, min(int(max_results or 5), 10)),
+        "key": settings.youtube_api_key,
+    }
+    try:
+        response = requests.get("https://www.googleapis.com/youtube/v3/playlistItems", params=params, timeout=15)
+        payload = response.json()
+    except Exception as exc:
+        dlog(settings, "YouTube API fallback failed", channel_id, exc.__class__.__name__, str(exc))
+        return [], {"status": None, "items": 0, "error": f"{exc.__class__.__name__}: {exc}"}
+
+    if response.status_code != 200:
+        error = payload.get("error", {}) if isinstance(payload, dict) else {}
+        message = error.get("message") or response.text[:200]
+        dlog(settings, "YouTube API fallback failed", channel_id, "status", response.status_code, message)
+        return [], {"status": response.status_code, "items": 0, "error": message}
+
+    entries = []
+    for item in payload.get("items", []):
+        entry = youtube_api_item_to_entry(item)
+        if entry:
+            entries.append(entry)
+    dlog(settings, "YouTube API fallback", channel_id, "entries", len(entries), "status", response.status_code)
+    return entries, {"status": response.status_code, "items": len(entries), "error": None}
 
 
 def create_thread(
@@ -824,6 +890,20 @@ def process_channel(
         "attempt",
         feed_meta.get("attempt"),
     )
+    if not entries:
+        entries, api_meta = fetch_youtube_api_entries(settings, channel_id, settings.max_feed_candidate_fallbacks)
+        if entries:
+            dlog(
+                settings,
+                "feed fallback",
+                feed_url,
+                "source",
+                "youtube-data-api",
+                "entries",
+                len(entries),
+                "status",
+                api_meta.get("status"),
+            )
     if not entries:
         return
 

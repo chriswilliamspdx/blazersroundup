@@ -17,6 +17,7 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 
 - The worker uses `config/feeds.youtube.yaml` by default.
 - Each poll considers only the newest video from each configured YouTube channel.
+- If YouTube channel RSS returns zero entries or an error, the worker can fall back to the official YouTube Data API when `YOUTUBE_API_KEY` is set.
 - If the newest YouTube entry is an upcoming live event, the worker skips it and tries the next newest entry from that channel.
 - Successfully handled newest videos advance that feed's baseline.
 - Transcript failures do not advance the feed baseline; the episode stays eligible for a later retry.
@@ -67,6 +68,7 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `GEMINI_API_KEY`
 - `GEMINI_MODEL` = `gemini-3.1-flash-lite` (recommended; default remains `gemini-2.5-flash-lite`)
 - `GEMINI_THINKING_LEVEL` = `low` for Gemini 3 models (optional)
+- `YOUTUBE_API_KEY` = YouTube Data API v3 key for newest-video lookup when RSS fails (optional but recommended on Railway)
 - `LLM_MAX_CALLS_PER_POLL` = 10 (optional, lower to 3-5 while testing)
 - `LLM_RETRY_MINUTES` = 60 (optional)
 - `LLM_MAX_ATTEMPTS` = 5 (optional)
