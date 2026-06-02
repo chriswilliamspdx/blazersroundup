@@ -1,8 +1,10 @@
 import base64
 import json
 import os
+import random
 import re
 import tempfile
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -36,6 +38,16 @@ except ModuleNotFoundError as exc:
 LANGUAGE_PRIORITY = ["en", "en-US", "en-GB"]
 CAPTION_FORMAT_PRIORITY = ["json3", "vtt"]
 COOKIE_FILE_PATH = os.path.join(tempfile.gettempdir(), "ytdlp-cookies.txt")
+DEFAULT_PROXY_LIST_URLS = [
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+    "https://raw.githubusercontent.com/yuceltoluyag/GoodProxy/main/GoodProxy.txt",
+    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/proxies.txt",
+]
+PROXY_LIST_CACHE: dict[str, object] = {"loaded_at": 0.0, "urls": (), "proxies": []}
+PROXY_TOKEN_RE = re.compile(
+    r"^(?:(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*)://)?(?P<host>[A-Za-z0-9_.-]+):(?P<port>\d{1,5})$"
+)
 
 
 @dataclass
@@ -63,6 +75,10 @@ class TranscriptSettings:
     oneproxy_can_access_google: bool | None = None
     oneproxy_strategy: str = "quality"
     oneproxy_max_latency: int | None = None
+    proxy_list_urls: list[str] | None = None
+    proxy_list_protocols: list[str] | None = None
+    proxy_list_refresh_seconds: int = 3600
+    proxy_list_max_proxies: int = 2000
     proxy_timeout_seconds: float = 10.0
 
 
@@ -284,6 +300,99 @@ def _normalize_proxy_url(value: str, default_scheme: str = "http") -> str | None
     return value
 
 
+def _candidate_proxy_tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    for raw_line in (text or "").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        for token in re.split(r"[\s,;]+", line):
+            token = token.strip().strip("\"'()[]{}")
+            if token:
+                tokens.append(token)
+    return tokens
+
+
+def _proxy_from_raw_list_token(token: str, allowed_protocols: list[str] | None = None) -> str | None:
+    allowed = {item.lower() for item in (allowed_protocols or ["http", "https"])}
+    match = PROXY_TOKEN_RE.match((token or "").strip())
+    if not match:
+        return None
+
+    scheme = (match.group("scheme") or "http").lower()
+    if scheme not in allowed:
+        return None
+
+    port = int(match.group("port"))
+    if port < 1 or port > 65535:
+        return None
+
+    return f"{scheme}://{match.group('host')}:{port}"
+
+
+def _load_raw_proxy_lists(settings: TranscriptSettings, log: Callable[..., None] | None = None) -> list[str]:
+    urls = settings.proxy_list_urls or DEFAULT_PROXY_LIST_URLS
+    urls = [url.strip() for url in urls if url.strip()]
+    urls_key = tuple(urls)
+    now = time.time()
+    cached_urls = tuple(PROXY_LIST_CACHE.get("urls") or ())
+    cached_proxies = list(PROXY_LIST_CACHE.get("proxies") or [])
+    loaded_at = float(PROXY_LIST_CACHE.get("loaded_at") or 0.0)
+
+    if cached_proxies and cached_urls == urls_key and now - loaded_at < max(60, settings.proxy_list_refresh_seconds):
+        proxies = cached_proxies
+    else:
+        session = TimeoutSession(settings.proxy_timeout_seconds)
+        session.headers.update({"User-Agent": "blazersroundup/1.0"})
+        seen: set[str] = set()
+        proxies = []
+        protocols = settings.proxy_list_protocols or ["http", "https"]
+
+        for url in urls:
+            try:
+                response = session.get(url)
+                response.raise_for_status()
+            except Exception as exc:
+                if log:
+                    log("proxy list unavailable", url, exc.__class__.__name__)
+                continue
+
+            before = len(proxies)
+            for token in _candidate_proxy_tokens(response.text):
+                proxy_url = _proxy_from_raw_list_token(token, protocols)
+                if proxy_url and proxy_url not in seen:
+                    seen.add(proxy_url)
+                    proxies.append(proxy_url)
+            if log:
+                log("proxy list loaded", url, len(proxies) - before, "usable")
+
+        random.shuffle(proxies)
+        if settings.proxy_list_max_proxies > 0:
+            proxies = proxies[: settings.proxy_list_max_proxies]
+        PROXY_LIST_CACHE.update({"loaded_at": now, "urls": urls_key, "proxies": proxies})
+
+    shuffled = list(proxies)
+    random.shuffle(shuffled)
+    if log:
+        log("proxy list pool ready", len(shuffled), "usable proxies")
+    return shuffled
+
+
+def _raw_proxy_list_factory(settings: TranscriptSettings, log: Callable[..., None] | None = None) -> Callable[[], str] | None:
+    proxies = _load_raw_proxy_lists(settings, log=log)
+    if not proxies:
+        return None
+
+    index = -1
+
+    def next_proxy() -> str:
+        nonlocal index
+        index = (index + 1) % len(proxies)
+        return proxies[index]
+
+    return next_proxy
+
+
 def _swiftshadow_proxy_factory(settings: TranscriptSettings) -> Callable[[], str] | None:
     from swiftshadow.classes import ProxyInterface
 
@@ -469,6 +578,8 @@ def fetch_transcript(video_id: str, settings: TranscriptSettings, log: Callable[
                     factory = _swiftshadow_proxy_factory(settings)
                 elif source in ("1proxy", "oneproxy"):
                     factory = _oneproxy_proxy_factory(settings)
+                elif source in ("proxylist", "rawlist", "raw"):
+                    factory = _raw_proxy_list_factory(settings, log=log)
                 else:
                     log("unknown transcript proxy source", source)
                     factory = None
@@ -527,11 +638,25 @@ def fetch_transcript(video_id: str, settings: TranscriptSettings, log: Callable[
 def settings_from_env() -> TranscriptSettings:
     countries = [item.strip().upper() for item in os.getenv("SWIFTSHADOW_COUNTRIES", "US").split(",") if item.strip()]
     clients = [item.strip() for item in os.getenv("YTDLP_EXTRACTOR_CLIENTS", "android,web").split(",") if item.strip()]
-    proxy_sources = [item.strip().lower() for item in os.getenv("TRANSCRIPT_PROXY_SOURCES", "swiftshadow").split(",") if item.strip()]
+    proxy_sources = [
+        item.strip().lower()
+        for item in os.getenv("TRANSCRIPT_PROXY_SOURCES", "proxylist,1proxy,swiftshadow").split(",")
+        if item.strip()
+    ]
     swiftshadow_protocols = [
         item.strip().lower() for item in os.getenv("SWIFTSHADOW_PROTOCOLS", os.getenv("SWIFTSHADOW_PROTOCOL", "http,https")).split(",") if item.strip()
     ]
     oneproxy_protocols = [item.strip().lower() for item in os.getenv("ONEPROXY_PROTOCOLS", "http,https").split(",") if item.strip()]
+    proxy_list_urls = [
+        item.strip()
+        for item in os.getenv("TRANSCRIPT_PROXY_LIST_URLS", ",".join(DEFAULT_PROXY_LIST_URLS)).split(",")
+        if item.strip()
+    ]
+    proxy_list_protocols = [
+        item.strip().lower()
+        for item in os.getenv("TRANSCRIPT_PROXY_LIST_PROTOCOLS", "http,https").split(",")
+        if item.strip()
+    ]
     oneproxy_min_quality = os.getenv("ONEPROXY_MIN_QUALITY")
     oneproxy_can_access_google = os.getenv("ONEPROXY_CAN_ACCESS_GOOGLE")
     oneproxy_max_latency = os.getenv("ONEPROXY_MAX_LATENCY")
@@ -563,5 +688,9 @@ def settings_from_env() -> TranscriptSettings:
         ),
         oneproxy_strategy=os.getenv("ONEPROXY_STRATEGY", "quality"),
         oneproxy_max_latency=int(oneproxy_max_latency) if oneproxy_max_latency else None,
+        proxy_list_urls=proxy_list_urls or DEFAULT_PROXY_LIST_URLS,
+        proxy_list_protocols=proxy_list_protocols or ["http", "https"],
+        proxy_list_refresh_seconds=int(os.getenv("TRANSCRIPT_PROXY_LIST_REFRESH_SECONDS", "3600")),
+        proxy_list_max_proxies=int(os.getenv("TRANSCRIPT_PROXY_LIST_MAX_PROXIES", "2000")),
         proxy_timeout_seconds=float(os.getenv("TRANSCRIPT_PROXY_TIMEOUT_SECONDS", "10.0")),
     )
