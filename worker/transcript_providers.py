@@ -48,6 +48,11 @@ BLOCKED_TRANSCRIPT_ERROR_TYPES = {
     "RequestBlocked",
     "IpBlocked",
 }
+PROXY_BLOCKED_ERROR_TYPES = {
+    "HTTPError",
+    "IpBlocked",
+    "RequestBlocked",
+}
 DEFAULT_PROXY_LIST_URLS = [
     "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt",
     "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
@@ -55,6 +60,7 @@ DEFAULT_PROXY_LIST_URLS = [
     "https://raw.githubusercontent.com/mmpx12/proxy-list/master/proxies.txt",
 ]
 PROXY_LIST_CACHE: dict[str, object] = {"loaded_at": 0.0, "urls": (), "proxies": []}
+PROXY_HEALTH_CACHE: dict[str, dict[str, object]] = {}
 PROXY_TOKEN_RE = re.compile(
     r"^(?:(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*)://)?(?P<host>[A-Za-z0-9_.-]+):(?P<port>\d{1,5})$"
 )
@@ -90,6 +96,9 @@ class TranscriptSettings:
     proxy_list_refresh_seconds: int = 3600
     proxy_list_max_proxies: int = 2000
     proxy_timeout_seconds: float = 10.0
+    proxy_bad_cooldown_seconds: int = 3600
+    proxy_blocked_cooldown_seconds: int = 21600
+    proxy_selection_attempts: int = 25
 
 
 @dataclass
@@ -308,6 +317,75 @@ def _normalize_proxy_url(value: str, default_scheme: str = "http") -> str | None
     if "://" not in value:
         value = f"{default_scheme}://{value}"
     return value
+
+
+def _proxy_failure_cooldown_seconds(settings: TranscriptSettings, error_type: str) -> int:
+    if error_type in PROXY_BLOCKED_ERROR_TYPES:
+        return max(0, settings.proxy_blocked_cooldown_seconds)
+    return max(0, settings.proxy_bad_cooldown_seconds)
+
+
+def _proxy_is_cooling_down(proxy_url: str, now: float | None = None) -> bool:
+    state = PROXY_HEALTH_CACHE.get(proxy_url)
+    if not state:
+        return False
+
+    now = time.time() if now is None else now
+    blocked_until = float(state.get("blocked_until") or 0.0)
+    if blocked_until <= now:
+        PROXY_HEALTH_CACHE.pop(proxy_url, None)
+        return False
+    return True
+
+
+def _record_proxy_failure(proxy_url: str | None, error_type: str, settings: TranscriptSettings) -> None:
+    if not proxy_url:
+        return
+
+    cooldown = _proxy_failure_cooldown_seconds(settings, error_type)
+    if cooldown <= 0:
+        return
+
+    now = time.time()
+    state = PROXY_HEALTH_CACHE.get(proxy_url) or {}
+    fail_count = int(state.get("fail_count") or 0) + 1
+    multiplier = min(4, 2 ** max(0, fail_count - 1))
+    PROXY_HEALTH_CACHE[proxy_url] = {
+        "blocked_until": now + cooldown * multiplier,
+        "fail_count": fail_count,
+        "last_error_type": error_type,
+        "last_failed_at": now,
+    }
+
+
+def _record_proxy_success(proxy_url: str | None) -> None:
+    if proxy_url:
+        PROXY_HEALTH_CACHE.pop(proxy_url, None)
+
+
+def _next_usable_proxy(
+    source: str,
+    next_proxy: Callable[[], str],
+    settings: TranscriptSettings,
+    log: Callable[..., None] | None = None,
+) -> str:
+    attempts = max(1, settings.proxy_selection_attempts)
+    skipped = 0
+    fallback_proxy = None
+    for _ in range(attempts):
+        proxy_url = next_proxy()
+        fallback_proxy = proxy_url
+        if not _proxy_is_cooling_down(proxy_url):
+            if skipped and log:
+                log("skipped unhealthy transcript proxies", source, skipped)
+            return proxy_url
+        skipped += 1
+
+    if skipped and log:
+        log("all sampled transcript proxies unhealthy", source, skipped, "using least-recent candidate")
+    if fallback_proxy:
+        return fallback_proxy
+    raise TranscriptError("proxy source did not return a proxy", "NoProxy", transient=True)
 
 
 def _candidate_proxy_tokens(text: str) -> list[str]:
@@ -610,40 +688,48 @@ def fetch_transcript(video_id: str, settings: TranscriptSettings, log: Callable[
 
         for source, next_proxy in proxy_factories:
             for attempt in range(max(1, settings.proxy_attempts)):
+                proxy_url = None
                 try:
-                    proxy_url = next_proxy()
+                    proxy_url = _next_usable_proxy(source, next_proxy, settings, log=log)
                     log("trying transcript proxy", source, "youtube-transcript-api", attempt + 1)
                     result = fetch_with_youtube_transcript_api(
                         video_id,
                         proxy_url=proxy_url,
                         timeout_seconds=settings.request_timeout_seconds,
                     )
+                    _record_proxy_success(proxy_url)
                     log("transcript ok", video_id, result.provider)
                     return result
                 except TranscriptError as exc:
                     if exc.error_type == "LiveUpcoming":
                         raise exc
+                    _record_proxy_failure(proxy_url, exc.error_type, settings)
                     errors.append(exc)
                     log("transcript proxy failed", video_id, exc.error_type)
                 except Exception as exc:
+                    _record_proxy_failure(proxy_url, exc.__class__.__name__, settings)
                     errors.append(TranscriptError(str(exc), exc.__class__.__name__, transient=True))
                     log("transcript proxy failed", video_id, exc.__class__.__name__)
 
         if settings.proxy_ytdlp_enabled:
             for source, next_proxy in proxy_factories:
                 for attempt in range(max(0, settings.proxy_ytdlp_attempts)):
+                    proxy_url = None
                     try:
-                        proxy_url = next_proxy()
+                        proxy_url = _next_usable_proxy(source, next_proxy, settings, log=log)
                         log("trying transcript proxy", source, "yt-dlp", attempt + 1)
                         result = fetch_with_ytdlp(video_id, settings, proxy_url=proxy_url)
+                        _record_proxy_success(proxy_url)
                         log("transcript ok", video_id, result.provider)
                         return result
                     except TranscriptError as exc:
                         if exc.error_type == "LiveUpcoming":
                             raise exc
+                        _record_proxy_failure(proxy_url, exc.error_type, settings)
                         errors.append(exc)
                         log("transcript proxy failed", video_id, exc.error_type)
                     except Exception as exc:
+                        _record_proxy_failure(proxy_url, exc.__class__.__name__, settings)
                         errors.append(TranscriptError(str(exc), exc.__class__.__name__, transient=True))
                         log("transcript proxy failed", video_id, exc.__class__.__name__)
 
@@ -712,4 +798,7 @@ def settings_from_env() -> TranscriptSettings:
         proxy_list_refresh_seconds=int(os.getenv("TRANSCRIPT_PROXY_LIST_REFRESH_SECONDS", "3600")),
         proxy_list_max_proxies=int(os.getenv("TRANSCRIPT_PROXY_LIST_MAX_PROXIES", "2000")),
         proxy_timeout_seconds=float(os.getenv("TRANSCRIPT_PROXY_TIMEOUT_SECONDS", "10.0")),
+        proxy_bad_cooldown_seconds=int(os.getenv("TRANSCRIPT_PROXY_BAD_COOLDOWN_SECONDS", "3600")),
+        proxy_blocked_cooldown_seconds=int(os.getenv("TRANSCRIPT_PROXY_BLOCKED_COOLDOWN_SECONDS", "21600")),
+        proxy_selection_attempts=int(os.getenv("TRANSCRIPT_PROXY_SELECTION_ATTEMPTS", "25")),
     )
