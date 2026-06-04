@@ -82,16 +82,20 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `RESET_LLM_STATE` = 1 to clear Gemini cooldown and summary retry state on startup; remove after one deploy
 - `FEED_MODE` = `all`, `national`, or `blazers` (optional, use `blazers` while testing)
 - `MAX_VIDEOS_PER_FEED` = 1 (optional; the worker only considers the newest episode per feed)
-- `MAX_FEED_CANDIDATE_FALLBACKS` = 5 (optional; only used to step past upcoming live videos)
+- `MAX_FEED_CANDIDATE_FALLBACKS` = 15 (optional; lets the worker step past live/upcoming, already-seen, or retry-not-due videos)
+- `MAX_TRANSIENT_FAILURES_PER_FEED` = 2 (optional; max blocked/failing transcript attempts before moving to the next channel)
 - `MAX_VIDEOS_PER_POLL` = 40 (optional, lower to 5-10 while testing)
 - `SUMMARY_POST_CHAR_LIMIT` = 250 (optional)
 - `SCAN_PAUSE_SECONDS` = 2.0 (optional, increase to slow requests)
+- `YOUTUBE_METADATA_CHECK_ENABLED` = 1 (optional; skips live/upcoming videos before transcript attempts)
+- `YOUTUBE_COMPLETED_STREAMS_ENABLED` = 1 (optional; enables completed livestream lookups for feeds with `scan_streams: true`)
+- `YOUTUBE_STREAM_SEARCH_MINUTES` = 60 (optional; minimum minutes between completed-stream searches per channel)
 - `TRANSCRIPT_RETRY_MINUTES` = 60 (optional)
 - `TRANSCRIPT_MAX_ATTEMPTS` = 5 (optional)
 - `TRANSCRIPT_PROXY_ENABLED` = 0 or 1 (optional)
 - `TRANSCRIPT_PROXY_SOURCES` = `proxylist,1proxy,swiftshadow` (optional)
 - `TRANSCRIPT_PROXY_ATTEMPTS` = 2 (optional)
-- `TRANSCRIPT_PROXY_YTDLP_ENABLED` = 0 or 1 (optional)
+- `TRANSCRIPT_PROXY_YTDLP_ENABLED` = 0 or 1 (optional; default is 0 so cookie-backed `yt-dlp` avoids free proxies)
 - `TRANSCRIPT_PROXY_YTDLP_ATTEMPTS` = 1 (optional)
 - `TRANSCRIPT_REQUEST_TIMEOUT_SECONDS` = 10.0 (optional)
 - `TRANSCRIPT_PROXY_TIMEOUT_SECONDS` = 10.0 (optional)
@@ -102,6 +106,12 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `TRANSCRIPT_PROXY_BAD_COOLDOWN_SECONDS` = 3600 (optional; skip recently broken proxies for 1 hour)
 - `TRANSCRIPT_PROXY_BLOCKED_COOLDOWN_SECONDS` = 21600 (optional; skip YouTube-blocked proxies for 6 hours)
 - `TRANSCRIPT_PROXY_SELECTION_ATTEMPTS` = 25 (optional; how many proxies to sample while skipping unhealthy ones)
+- `TRANSCRIPT_PROXY_REPUTATION_ENABLED` = 1 (optional; persists proxy health in Postgres)
+- `TRANSCRIPT_PROXY_GOOD_POOL_LIMIT` = 100 (optional; max known-good proxies to sample from)
+- `TRANSCRIPT_PROXY_GOOD_ATTEMPTS` = 1 (optional; known-good proxy attempts before fresh proxy sources)
+- `TRANSCRIPT_PROXY_GOOD_REST_SECONDS` = 3600 (optional; rest known-good proxies after success)
+- `TRANSCRIPT_PROXY_RETIRE_AFTER_FAILURES` = 5 (optional; retire repeatedly broken proxies)
+- `TRANSCRIPT_PROXY_RETIRE_AFTER_BLOCKS` = 2 (optional; retire repeatedly YouTube-blocked proxies)
 - `SWIFTSHADOW_COUNTRIES` = `US` (optional)
 - `SWIFTSHADOW_PROTOCOLS` = `http,https` (optional)
 - `ONEPROXY_API_URL` = `https://1proxy-api.aitradepulse.com/api/v1/proxies/rotate` (optional)
@@ -120,7 +130,9 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `YTDLP_EXTRACTOR_RETRIES` = 1 (optional)
 
 Use a dedicated YouTube account for cookies, not your primary personal account.
-If free proxies make `yt-dlp` sit on bad proxy tunnels for too long, set `TRANSCRIPT_PROXY_YTDLP_ENABLED=0` to keep proxy retries focused on `youtube-transcript-api`.
+Free proxy retries are focused on `youtube-transcript-api`; keep `TRANSCRIPT_PROXY_YTDLP_ENABLED=0` unless you intentionally want cookie-backed `yt-dlp` to use proxies.
+
+Feeds can opt into completed livestream discovery with `scan_streams: true`. This uses the YouTube Data API search endpoint, so enable it only for channels where archived streams matter.
 
 ## Local checks
 

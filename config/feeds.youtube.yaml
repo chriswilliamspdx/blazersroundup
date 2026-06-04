@@ -160,6 +160,7 @@ blazers_feeds:
 - rss: https://feeds.simplecast.com/XZ1wZfs_
   youtube_search: 'Jacked Ramsays: A Portland Trail Blazers Podcast'
   youtube_channel_id: UCmNEPBzNMTHbc25O_v3IlXg
+  scan_streams: true
 - rss: http://feeds.megaphone.fm/blazerfocused
   youtube_search: Blazer Focused
   youtube_channel_id: UCra-NCIxn2Xl3Ssr5kqvuYA
@@ -172,9 +173,11 @@ blazers_feeds:
 - rss: https://feeds.acast.com/public/shows/65ac80def653f800165c13fc
   youtube_search: 'The Rose Garden Report: A Portland Trail Blazers and NBA Podcast'
   youtube_channel_id: UC9YEk_-sQzPHWNHeuu9VP1A
+  scan_streams: true
 - rss: https://sagedigital.libsyn.com/rss
   youtube_search: Holy Backboard
   youtube_channel_id: UCSO0QAQiFPKQaMXBpBgNfLg
+  scan_streams: true
 - rss: https://feeds.megaphone.fm/ROMN6537468398
   youtube_search: We Like the Blazers
   youtube_channel_id: UCYvinFUqrrxarIqPU5trZig

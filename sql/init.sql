@@ -39,6 +39,26 @@ create table if not exists summary_attempts (
   next_retry_at timestamptz
 );
 
+-- Persistent health/reputation memory for free transcript proxies.
+create table if not exists proxy_health (
+  proxy_url text primary key,
+  source text not null default 'unknown',
+  status text not null default 'candidate',
+  success_count integer not null default 0,
+  failure_count integer not null default 0,
+  blocked_count integer not null default 0,
+  last_success_at timestamptz,
+  last_failure_at timestamptz,
+  last_error_type text,
+  cooldown_until timestamptz,
+  retired_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_proxy_health_status_cooldown
+  on proxy_health(status, cooldown_until);
+
 -- OAuth session for the bot web service.
 create table if not exists oauth_sessions (
   sub text primary key,

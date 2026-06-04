@@ -99,6 +99,12 @@ class TranscriptSettings:
     proxy_bad_cooldown_seconds: int = 3600
     proxy_blocked_cooldown_seconds: int = 21600
     proxy_selection_attempts: int = 25
+    proxy_reputation_enabled: bool = True
+    proxy_good_pool_limit: int = 100
+    proxy_good_attempts: int = 1
+    proxy_good_rest_seconds: int = 3600
+    proxy_retire_after_failures: int = 5
+    proxy_retire_after_blocks: int = 2
 
 
 @dataclass
@@ -338,9 +344,38 @@ def _proxy_is_cooling_down(proxy_url: str, now: float | None = None) -> bool:
     return True
 
 
-def _record_proxy_failure(proxy_url: str | None, error_type: str, settings: TranscriptSettings) -> None:
+def _proxy_db_available(proxy_memory, proxy_url: str, settings: TranscriptSettings) -> bool:
+    if not proxy_memory or not settings.proxy_reputation_enabled:
+        return True
+    try:
+        return bool(proxy_memory.proxy_available(proxy_url))
+    except Exception:
+        return True
+
+
+def _record_proxy_failure(
+    proxy_url: str | None,
+    error_type: str,
+    settings: TranscriptSettings,
+    source: str = "unknown",
+    proxy_memory=None,
+) -> None:
     if not proxy_url:
         return
+
+    if proxy_memory and settings.proxy_reputation_enabled:
+        try:
+            proxy_memory.record_proxy_failure(
+                proxy_url,
+                source,
+                error_type,
+                settings.proxy_bad_cooldown_seconds,
+                settings.proxy_blocked_cooldown_seconds,
+                settings.proxy_retire_after_failures,
+                settings.proxy_retire_after_blocks,
+            )
+        except Exception:
+            pass
 
     cooldown = _proxy_failure_cooldown_seconds(settings, error_type)
     if cooldown <= 0:
@@ -358,9 +393,19 @@ def _record_proxy_failure(proxy_url: str | None, error_type: str, settings: Tran
     }
 
 
-def _record_proxy_success(proxy_url: str | None) -> None:
+def _record_proxy_success(
+    proxy_url: str | None,
+    source: str = "unknown",
+    settings: TranscriptSettings | None = None,
+    proxy_memory=None,
+) -> None:
     if proxy_url:
         PROXY_HEALTH_CACHE.pop(proxy_url, None)
+    if proxy_url and proxy_memory and settings and settings.proxy_reputation_enabled:
+        try:
+            proxy_memory.record_proxy_success(proxy_url, source, settings.proxy_good_rest_seconds)
+        except Exception:
+            pass
 
 
 def _next_usable_proxy(
@@ -368,6 +413,7 @@ def _next_usable_proxy(
     next_proxy: Callable[[], str],
     settings: TranscriptSettings,
     log: Callable[..., None] | None = None,
+    proxy_memory=None,
 ) -> str:
     attempts = max(1, settings.proxy_selection_attempts)
     skipped = 0
@@ -375,7 +421,7 @@ def _next_usable_proxy(
     for _ in range(attempts):
         proxy_url = next_proxy()
         fallback_proxy = proxy_url
-        if not _proxy_is_cooling_down(proxy_url):
+        if not _proxy_is_cooling_down(proxy_url) and _proxy_db_available(proxy_memory, proxy_url, settings):
             if skipped and log:
                 log("skipped unhealthy transcript proxies", source, skipped)
             return proxy_url
@@ -386,6 +432,33 @@ def _next_usable_proxy(
     if fallback_proxy:
         return fallback_proxy
     raise TranscriptError("proxy source did not return a proxy", "NoProxy", transient=True)
+
+
+def _reputation_proxy_factory(proxy_memory, settings: TranscriptSettings, log: Callable[..., None] | None = None):
+    if not proxy_memory or not settings.proxy_reputation_enabled:
+        return None
+    try:
+        rows = proxy_memory.good_proxies(settings.proxy_good_pool_limit)
+    except Exception as exc:
+        if log:
+            log("proxy reputation unavailable", exc.__class__.__name__)
+        return None
+
+    proxies = [row["proxy_url"] for row in rows if row.get("proxy_url")]
+    if not proxies:
+        return None
+    random.shuffle(proxies)
+    if log:
+        log("proxy reputation pool ready", len(proxies), "usable proxies")
+
+    index = -1
+
+    def next_proxy() -> str:
+        nonlocal index
+        index = (index + 1) % len(proxies)
+        return proxies[index]
+
+    return next_proxy
 
 
 def _candidate_proxy_tokens(text: str) -> list[str]:
@@ -640,7 +713,12 @@ def cookiefile_from_env() -> str | None:
     return COOKIE_FILE_PATH
 
 
-def fetch_transcript(video_id: str, settings: TranscriptSettings, log: Callable[..., None] = print) -> TranscriptResult:
+def fetch_transcript(
+    video_id: str,
+    settings: TranscriptSettings,
+    log: Callable[..., None] = print,
+    proxy_memory=None,
+) -> TranscriptResult:
     errors: list[TranscriptError] = []
 
     for provider_name, call in (
@@ -668,6 +746,9 @@ def fetch_transcript(video_id: str, settings: TranscriptSettings, log: Callable[
             )
 
         proxy_factories = []
+        reputation_factory = _reputation_proxy_factory(proxy_memory, settings, log=log)
+        if reputation_factory:
+            proxy_factories.append(("reputation", reputation_factory, max(0, settings.proxy_good_attempts)))
         for source in settings.proxy_sources or ["swiftshadow"]:
             source = source.strip().lower()
             try:
@@ -684,52 +765,52 @@ def fetch_transcript(video_id: str, settings: TranscriptSettings, log: Callable[
                 log(f"{source} unavailable", exc.__class__.__name__, str(exc))
                 factory = None
             if factory:
-                proxy_factories.append((source, factory))
+                proxy_factories.append((source, factory, max(1, settings.proxy_attempts)))
 
-        for source, next_proxy in proxy_factories:
-            for attempt in range(max(1, settings.proxy_attempts)):
+        for source, next_proxy, attempt_count in proxy_factories:
+            for attempt in range(attempt_count):
                 proxy_url = None
                 try:
-                    proxy_url = _next_usable_proxy(source, next_proxy, settings, log=log)
+                    proxy_url = _next_usable_proxy(source, next_proxy, settings, log=log, proxy_memory=proxy_memory)
                     log("trying transcript proxy", source, "youtube-transcript-api", attempt + 1)
                     result = fetch_with_youtube_transcript_api(
                         video_id,
                         proxy_url=proxy_url,
                         timeout_seconds=settings.request_timeout_seconds,
                     )
-                    _record_proxy_success(proxy_url)
+                    _record_proxy_success(proxy_url, source, settings, proxy_memory)
                     log("transcript ok", video_id, result.provider)
                     return result
                 except TranscriptError as exc:
                     if exc.error_type == "LiveUpcoming":
                         raise exc
-                    _record_proxy_failure(proxy_url, exc.error_type, settings)
+                    _record_proxy_failure(proxy_url, exc.error_type, settings, source, proxy_memory)
                     errors.append(exc)
                     log("transcript proxy failed", video_id, exc.error_type)
                 except Exception as exc:
-                    _record_proxy_failure(proxy_url, exc.__class__.__name__, settings)
+                    _record_proxy_failure(proxy_url, exc.__class__.__name__, settings, source, proxy_memory)
                     errors.append(TranscriptError(str(exc), exc.__class__.__name__, transient=True))
                     log("transcript proxy failed", video_id, exc.__class__.__name__)
 
         if settings.proxy_ytdlp_enabled:
-            for source, next_proxy in proxy_factories:
+            for source, next_proxy, _attempt_count in proxy_factories:
                 for attempt in range(max(0, settings.proxy_ytdlp_attempts)):
                     proxy_url = None
                     try:
-                        proxy_url = _next_usable_proxy(source, next_proxy, settings, log=log)
+                        proxy_url = _next_usable_proxy(source, next_proxy, settings, log=log, proxy_memory=proxy_memory)
                         log("trying transcript proxy", source, "yt-dlp", attempt + 1)
                         result = fetch_with_ytdlp(video_id, settings, proxy_url=proxy_url)
-                        _record_proxy_success(proxy_url)
+                        _record_proxy_success(proxy_url, source, settings, proxy_memory)
                         log("transcript ok", video_id, result.provider)
                         return result
                     except TranscriptError as exc:
                         if exc.error_type == "LiveUpcoming":
                             raise exc
-                        _record_proxy_failure(proxy_url, exc.error_type, settings)
+                        _record_proxy_failure(proxy_url, exc.error_type, settings, source, proxy_memory)
                         errors.append(exc)
                         log("transcript proxy failed", video_id, exc.error_type)
                     except Exception as exc:
-                        _record_proxy_failure(proxy_url, exc.__class__.__name__, settings)
+                        _record_proxy_failure(proxy_url, exc.__class__.__name__, settings, source, proxy_memory)
                         errors.append(TranscriptError(str(exc), exc.__class__.__name__, transient=True))
                         log("transcript proxy failed", video_id, exc.__class__.__name__)
 
@@ -772,7 +853,7 @@ def settings_from_env() -> TranscriptSettings:
         swiftshadow_protocol=os.getenv("SWIFTSHADOW_PROTOCOL", swiftshadow_protocols[0] if swiftshadow_protocols else "http").lower(),
         swiftshadow_protocols=swiftshadow_protocols or ["http", "https"],
         proxy_attempts=int(os.getenv("TRANSCRIPT_PROXY_ATTEMPTS", "2")),
-        proxy_ytdlp_enabled=os.getenv("TRANSCRIPT_PROXY_YTDLP_ENABLED", "1") == "1",
+        proxy_ytdlp_enabled=os.getenv("TRANSCRIPT_PROXY_YTDLP_ENABLED", "0") == "1",
         proxy_ytdlp_attempts=int(os.getenv("TRANSCRIPT_PROXY_YTDLP_ATTEMPTS", "1")),
         request_timeout_seconds=float(os.getenv("TRANSCRIPT_REQUEST_TIMEOUT_SECONDS", os.getenv("TRANSCRIPT_PROXY_TIMEOUT_SECONDS", "10.0"))),
         ytdlp_cookies=cookiefile_from_env(),
@@ -801,4 +882,10 @@ def settings_from_env() -> TranscriptSettings:
         proxy_bad_cooldown_seconds=int(os.getenv("TRANSCRIPT_PROXY_BAD_COOLDOWN_SECONDS", "3600")),
         proxy_blocked_cooldown_seconds=int(os.getenv("TRANSCRIPT_PROXY_BLOCKED_COOLDOWN_SECONDS", "21600")),
         proxy_selection_attempts=int(os.getenv("TRANSCRIPT_PROXY_SELECTION_ATTEMPTS", "25")),
+        proxy_reputation_enabled=os.getenv("TRANSCRIPT_PROXY_REPUTATION_ENABLED", "1") == "1",
+        proxy_good_pool_limit=int(os.getenv("TRANSCRIPT_PROXY_GOOD_POOL_LIMIT", "100")),
+        proxy_good_attempts=int(os.getenv("TRANSCRIPT_PROXY_GOOD_ATTEMPTS", "1")),
+        proxy_good_rest_seconds=int(os.getenv("TRANSCRIPT_PROXY_GOOD_REST_SECONDS", "3600")),
+        proxy_retire_after_failures=int(os.getenv("TRANSCRIPT_PROXY_RETIRE_AFTER_FAILURES", "5")),
+        proxy_retire_after_blocks=int(os.getenv("TRANSCRIPT_PROXY_RETIRE_AFTER_BLOCKS", "2")),
     )

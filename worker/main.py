@@ -67,6 +67,7 @@ class WorkerSettings:
     transcript_max_attempts: int
     max_videos_per_feed: int
     max_feed_candidate_fallbacks: int
+    max_transient_failures_per_feed: int
     max_videos_per_poll: int
     summary_post_char_limit: int
     llm_max_calls_per_poll: int
@@ -74,6 +75,9 @@ class WorkerSettings:
     llm_max_attempts: int
     llm_quota_cooldown_minutes: int
     gemini_thinking_level: str
+    youtube_metadata_check_enabled: bool
+    youtube_completed_streams_enabled: bool
+    youtube_stream_search_min_minutes: int
 
     @classmethod
     def from_env(cls):
@@ -102,7 +106,8 @@ class WorkerSettings:
             transcript_retry_minutes=int(os.getenv("TRANSCRIPT_RETRY_MINUTES", "60")),
             transcript_max_attempts=int(os.getenv("TRANSCRIPT_MAX_ATTEMPTS", "5")),
             max_videos_per_feed=int(os.getenv("MAX_VIDEOS_PER_FEED", "1")),
-            max_feed_candidate_fallbacks=int(os.getenv("MAX_FEED_CANDIDATE_FALLBACKS", "5")),
+            max_feed_candidate_fallbacks=int(os.getenv("MAX_FEED_CANDIDATE_FALLBACKS", "15")),
+            max_transient_failures_per_feed=int(os.getenv("MAX_TRANSIENT_FAILURES_PER_FEED", "2")),
             max_videos_per_poll=int(os.getenv("MAX_VIDEOS_PER_POLL", "40")),
             summary_post_char_limit=int(os.getenv("SUMMARY_POST_CHAR_LIMIT", "250")),
             llm_max_calls_per_poll=int(os.getenv("LLM_MAX_CALLS_PER_POLL", "10")),
@@ -110,6 +115,9 @@ class WorkerSettings:
             llm_max_attempts=int(os.getenv("LLM_MAX_ATTEMPTS", "5")),
             llm_quota_cooldown_minutes=int(os.getenv("LLM_QUOTA_COOLDOWN_MINUTES", "60")),
             gemini_thinking_level=os.getenv("GEMINI_THINKING_LEVEL", "low"),
+            youtube_metadata_check_enabled=os.getenv("YOUTUBE_METADATA_CHECK_ENABLED", "1") == "1",
+            youtube_completed_streams_enabled=os.getenv("YOUTUBE_COMPLETED_STREAMS_ENABLED", "1") == "1",
+            youtube_stream_search_min_minutes=int(os.getenv("YOUTUBE_STREAM_SEARCH_MINUTES", "60")),
         )
 
 
@@ -189,6 +197,31 @@ class Database:
               last_error_type text,
               next_retry_at timestamptz
             );
+            """
+        )
+        self.exec(
+            """
+            create table if not exists proxy_health (
+              proxy_url text primary key,
+              source text not null default 'unknown',
+              status text not null default 'candidate',
+              success_count integer not null default 0,
+              failure_count integer not null default 0,
+              blocked_count integer not null default 0,
+              last_success_at timestamptz,
+              last_failure_at timestamptz,
+              last_error_type text,
+              cooldown_until timestamptz,
+              retired_at timestamptz,
+              created_at timestamptz not null default now(),
+              updated_at timestamptz not null default now()
+            );
+            """
+        )
+        self.exec(
+            """
+            create index if not exists idx_proxy_health_status_cooldown
+              on proxy_health(status, cooldown_until);
             """
         )
 
@@ -343,6 +376,114 @@ class Database:
         self.set_state("llm_cooldown_until", cooldown_until.isoformat())
         self.set_state("llm_cooldown_reason", reason)
         return cooldown_until
+
+    def proxy_available(self, proxy_url: str, now=None) -> bool:
+        rows = self.exec("select status, cooldown_until from proxy_health where proxy_url=%s", [proxy_url])
+        if not rows:
+            return True
+        row = rows[0]
+        if row["status"] == "retired":
+            return False
+        cooldown_until = row.get("cooldown_until")
+        if cooldown_until and cooldown_until > (now or datetime.now(UTC)):
+            return False
+        return True
+
+    def good_proxies(self, limit: int = 100):
+        return self.exec(
+            """
+            select proxy_url, source
+            from proxy_health
+            where status='good'
+              and (cooldown_until is null or cooldown_until <= now())
+            order by random()
+            limit %s
+            """,
+            [max(1, int(limit or 100))],
+        )
+
+    def record_proxy_success(self, proxy_url: str, source: str, rest_seconds: int = 0):
+        cooldown_until = None
+        if rest_seconds > 0:
+            cooldown_until = datetime.now(UTC) + timedelta(seconds=rest_seconds)
+        self.exec(
+            """
+            insert into proxy_health(
+              proxy_url, source, status, success_count, last_success_at, last_error_type,
+              cooldown_until, retired_at, updated_at
+            )
+            values(%s, %s, 'good', 1, now(), null, %s, null, now())
+            on conflict(proxy_url) do update set
+              source = case
+                when excluded.source='reputation' then proxy_health.source
+                else excluded.source
+              end,
+              status = 'good',
+              success_count = proxy_health.success_count + 1,
+              last_success_at = now(),
+              last_error_type = null,
+              cooldown_until = excluded.cooldown_until,
+              retired_at = null,
+              updated_at = now()
+            """,
+            [proxy_url, source or "unknown", cooldown_until],
+        )
+
+    def record_proxy_failure(
+        self,
+        proxy_url: str,
+        source: str,
+        error_type: str,
+        bad_cooldown_seconds: int,
+        blocked_cooldown_seconds: int,
+        retire_after_failures: int,
+        retire_after_blocks: int,
+    ):
+        rows = self.exec("select failure_count, blocked_count from proxy_health where proxy_url=%s", [proxy_url])
+        failure_count = int(rows[0]["failure_count"]) + 1 if rows else 1
+        blocked_count = int(rows[0]["blocked_count"]) if rows else 0
+        is_blocked = error_type in ("IpBlocked", "RequestBlocked")
+        if is_blocked:
+            blocked_count += 1
+
+        if failure_count >= max(1, retire_after_failures) or blocked_count >= max(1, retire_after_blocks):
+            status = "retired"
+            cooldown_until = None
+            retired_at = datetime.now(UTC)
+        elif is_blocked:
+            status = "blocked"
+            multiplier = min(4, 2 ** max(0, blocked_count - 1))
+            cooldown_until = datetime.now(UTC) + timedelta(seconds=max(0, blocked_cooldown_seconds) * multiplier)
+            retired_at = None
+        else:
+            status = "cooldown"
+            multiplier = min(4, 2 ** max(0, failure_count - 1))
+            cooldown_until = datetime.now(UTC) + timedelta(seconds=max(0, bad_cooldown_seconds) * multiplier)
+            retired_at = None
+
+        self.exec(
+            """
+            insert into proxy_health(
+              proxy_url, source, status, failure_count, blocked_count,
+              last_failure_at, last_error_type, cooldown_until, retired_at, updated_at
+            )
+            values(%s, %s, %s, %s, %s, now(), %s, %s, %s, now())
+            on conflict(proxy_url) do update set
+              source = case
+                when excluded.source='reputation' then proxy_health.source
+                else excluded.source
+              end,
+              status = excluded.status,
+              failure_count = excluded.failure_count,
+              blocked_count = excluded.blocked_count,
+              last_failure_at = now(),
+              last_error_type = excluded.last_error_type,
+              cooldown_until = excluded.cooldown_until,
+              retired_at = excluded.retired_at,
+              updated_at = now()
+            """,
+            [proxy_url, source or "unknown", status, failure_count, blocked_count, error_type, cooldown_until, retired_at],
+        )
 
 
 class LLMError(Exception):
@@ -509,6 +650,16 @@ def youtube_api_item_to_entry(item: dict) -> dict | None:
     }
 
 
+def merge_youtube_entries(*entry_lists):
+    merged = {}
+    for entries in entry_lists:
+        for entry in entries or []:
+            video_id = parse_youtube_video_id(entry)
+            if video_id and video_id not in merged:
+                merged[video_id] = entry
+    return sorted(merged.values(), key=parse_pubdate, reverse=True)
+
+
 def parse_youtube_video_id(entry) -> str | None:
     video_id = entry.get("yt_videoid")
     if video_id:
@@ -644,6 +795,123 @@ def fetch_youtube_api_entries(settings: WorkerSettings, channel_id: str, max_res
     return entries, {"status": response.status_code, "items": len(entries), "error": None}
 
 
+def fetch_youtube_completed_stream_entries(
+    settings: WorkerSettings,
+    channel_id: str,
+    max_results: int,
+    published_after: datetime | None = None,
+):
+    if not settings.youtube_api_key:
+        dlog(settings, "YouTube completed streams unavailable: missing YOUTUBE_API_KEY")
+        return [], {"status": None, "items": 0, "error": "missing_api_key"}
+
+    params = {
+        "part": "snippet",
+        "channelId": channel_id,
+        "eventType": "completed",
+        "type": "video",
+        "order": "date",
+        "maxResults": max(1, min(int(max_results or 5), 10)),
+        "key": settings.youtube_api_key,
+    }
+    if published_after:
+        params["publishedAfter"] = published_after.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+    try:
+        response = requests.get("https://www.googleapis.com/youtube/v3/search", params=params, timeout=15)
+        payload = response.json()
+    except Exception as exc:
+        dlog(settings, "YouTube completed streams failed", channel_id, exc.__class__.__name__, str(exc))
+        return [], {"status": None, "items": 0, "error": f"{exc.__class__.__name__}: {exc}"}
+
+    if response.status_code != 200:
+        error = payload.get("error", {}) if isinstance(payload, dict) else {}
+        message = error.get("message") or response.text[:200]
+        dlog(settings, "YouTube completed streams failed", channel_id, "status", response.status_code, message)
+        return [], {"status": response.status_code, "items": 0, "error": message}
+
+    entries = []
+    for item in payload.get("items", []):
+        entry = youtube_api_item_to_entry(item)
+        if entry:
+            entry["source"] = "youtube-completed-stream"
+            entries.append(entry)
+    dlog(settings, "YouTube completed streams", channel_id, "entries", len(entries), "status", response.status_code)
+    return entries, {"status": response.status_code, "items": len(entries), "error": None}
+
+
+def _stream_scan_state_key(channel_id: str) -> str:
+    return f"youtube_stream_scan_at:{channel_id}"
+
+
+def stream_scan_due(settings: WorkerSettings, db: Database, channel_id: str, now=None) -> bool:
+    if settings.youtube_stream_search_min_minutes <= 0:
+        return True
+    value = db.get_state(_stream_scan_state_key(channel_id))
+    if not value:
+        return True
+    try:
+        last_scan = dtparse.isoparse(value).astimezone(UTC)
+    except Exception:
+        return True
+    now = now or datetime.now(UTC)
+    return last_scan + timedelta(minutes=settings.youtube_stream_search_min_minutes) <= now
+
+
+def record_stream_scan(settings: WorkerSettings, db: Database, channel_id: str):
+    if not settings.dry_run:
+        db.set_state(_stream_scan_state_key(channel_id), datetime.now(UTC).isoformat())
+
+
+def fetch_youtube_video_statuses(settings: WorkerSettings, video_ids: list[str]):
+    if not settings.youtube_api_key or not settings.youtube_metadata_check_enabled or not video_ids:
+        return {}
+
+    statuses = {}
+    for start in range(0, len(video_ids), 50):
+        batch = [video_id for video_id in video_ids[start : start + 50] if video_id]
+        if not batch:
+            continue
+        params = {
+            "part": "snippet,liveStreamingDetails",
+            "id": ",".join(batch),
+            "key": settings.youtube_api_key,
+        }
+        try:
+            response = requests.get("https://www.googleapis.com/youtube/v3/videos", params=params, timeout=15)
+            payload = response.json()
+        except Exception as exc:
+            dlog(settings, "YouTube video metadata failed", exc.__class__.__name__, str(exc))
+            continue
+
+        if response.status_code != 200:
+            error = payload.get("error", {}) if isinstance(payload, dict) else {}
+            message = error.get("message") or response.text[:200]
+            dlog(settings, "YouTube video metadata failed", "status", response.status_code, message)
+            continue
+
+        for item in payload.get("items", []):
+            video_id = item.get("id")
+            snippet = item.get("snippet") or {}
+            live_details = item.get("liveStreamingDetails") or {}
+            if video_id:
+                statuses[video_id] = {
+                    "live_broadcast_content": snippet.get("liveBroadcastContent") or "none",
+                    "actual_end_time": live_details.get("actualEndTime"),
+                }
+    if statuses:
+        dlog(settings, "YouTube video metadata", len(statuses), "videos")
+    return statuses
+
+
+def video_is_live_or_upcoming(status: dict | None) -> bool:
+    if not status:
+        return False
+    live_content = str(status.get("live_broadcast_content") or "none").lower()
+    actual_end_time = status.get("actual_end_time")
+    return live_content in ("live", "upcoming") and not actual_end_time
+
+
 def create_thread(
     settings: WorkerSettings,
     first_text: str,
@@ -709,6 +977,7 @@ VIDEO_OK = "ok"
 VIDEO_RETRY_LATER = "retry_later"
 VIDEO_NOT_DUE = "not_due"
 VIDEO_SKIP_CANDIDATE = "skip_candidate"
+VIDEO_ALREADY_SEEN = "already_seen"
 VIDEO_POST_FAILED = "post_failed"
 
 
@@ -724,6 +993,7 @@ def handle_video(
     mode: str,
     entry,
     video_id: str,
+    video_status: dict | None = None,
 ) -> str:
     guid = entry.get("id") or entry.get("link") or video_id
     published_at = parse_pubdate(entry)
@@ -731,9 +1001,12 @@ def handle_video(
     keywords = [keyword.lower() for keyword in config.get("keywords_positive", [])]
     post_char_limit = int(config.get("post_char_limit", 300))
 
+    if video_is_live_or_upcoming(video_status):
+        log("skip live/upcoming video from metadata", video_id)
+        return VIDEO_SKIP_CANDIDATE
     if db.already_seen(feed_url, guid, video_id):
         dlog(settings, "skip: already seen", video_id)
-        return VIDEO_OK
+        return VIDEO_ALREADY_SEEN
     cooldown_until = db.llm_cooldown_active()
     if cooldown_until:
         poll_context.llm_wait = True
@@ -754,7 +1027,7 @@ def handle_video(
         dlog(settings, "force transcript retry", video_id)
 
     try:
-        result = fetch_transcript(video_id, transcript_settings, log=log)
+        result = fetch_transcript(video_id, transcript_settings, log=log, proxy_memory=db)
         if not settings.dry_run:
             db.record_transcript_success(video_id)
     except TranscriptError as exc:
@@ -876,13 +1149,13 @@ def process_channel(
         show_name = ""
     feed_url = yt_channel_feed_url(channel_id)
     parsed, feed_meta = fetch_youtube_feed(settings, feed_url)
-    entries = list(parsed.entries)
+    rss_entries = list(parsed.entries)
     dlog(
         settings,
         "feed",
         feed_url,
         "entries",
-        len(entries),
+        len(rss_entries),
         "status",
         feed_meta.get("status"),
         "bytes",
@@ -890,9 +1163,11 @@ def process_channel(
         "attempt",
         feed_meta.get("attempt"),
     )
-    if not entries:
-        entries, api_meta = fetch_youtube_api_entries(settings, channel_id, settings.max_feed_candidate_fallbacks)
-        if entries:
+
+    api_entries = []
+    if not rss_entries:
+        api_entries, api_meta = fetch_youtube_api_entries(settings, channel_id, settings.max_feed_candidate_fallbacks)
+        if api_entries:
             dlog(
                 settings,
                 "feed fallback",
@@ -900,10 +1175,39 @@ def process_channel(
                 "source",
                 "youtube-data-api",
                 "entries",
-                len(entries),
+                len(api_entries),
                 "status",
                 api_meta.get("status"),
             )
+
+    stream_entries = []
+    if settings.youtube_completed_streams_enabled and feed.get("scan_streams"):
+        baseline = db.get_feed_baseline(feed_url)
+        if stream_scan_due(settings, db, channel_id):
+            published_after = baseline - timedelta(days=2) if baseline else None
+            stream_entries, stream_meta = fetch_youtube_completed_stream_entries(
+                settings,
+                channel_id,
+                settings.max_feed_candidate_fallbacks,
+                published_after=published_after,
+            )
+            if stream_entries:
+                dlog(
+                    settings,
+                    "feed streams",
+                    feed_url,
+                    "source",
+                    "youtube-completed-streams",
+                    "entries",
+                    len(stream_entries),
+                    "status",
+                    stream_meta.get("status"),
+                )
+            record_stream_scan(settings, db, channel_id)
+        else:
+            dlog(settings, "skip completed stream scan not due", channel_id)
+
+    entries = merge_youtube_entries(rss_entries, api_entries, stream_entries)
     if not entries:
         return
 
@@ -926,12 +1230,15 @@ def process_channel(
 
     dlog(settings, "candidates", len(candidates), "baseline", baseline.isoformat() if baseline else None)
     all_posting_ok = True
-    processed = 0
+    completed = 0
+    attempted = 0
+    transient_failures = 0
     newest_completed_pub = None
+    video_statuses = fetch_youtube_video_statuses(settings, [row[2] for row in candidates])
     for published_at, entry, video_id in candidates:
         if poll_context.llm_wait:
             break
-        if processed >= settings.max_videos_per_feed:
+        if completed >= settings.max_videos_per_feed:
             break
         outcome = handle_video(
             settings,
@@ -945,22 +1252,35 @@ def process_channel(
             mode,
             entry,
             video_id,
+            video_status=video_statuses.get(video_id),
         )
-        if outcome == VIDEO_SKIP_CANDIDATE:
+        if outcome in (VIDEO_SKIP_CANDIDATE, VIDEO_ALREADY_SEEN):
             continue
         if outcome == VIDEO_NOT_DUE:
+            dlog(settings, "skip candidate: retry not due", video_id)
             all_posting_ok = False
-            break
-        processed += 1
+            continue
+        attempted += 1
         if outcome == VIDEO_OK:
+            completed += 1
             newest_completed_pub = published_at if newest_completed_pub is None else max(newest_completed_pub, published_at)
+            dlog(settings, "feed completed candidate", video_id)
+            break
+        if outcome == VIDEO_RETRY_LATER and not poll_context.llm_wait:
+            transient_failures += 1
+            all_posting_ok = False
+            dlog(settings, "feed transient candidate", video_id, transient_failures)
+            if transient_failures < settings.max_transient_failures_per_feed:
+                continue
         else:
             all_posting_ok = False
         break
 
+    if candidates and completed == 0 and not poll_context.llm_wait:
+        dlog(settings, "feed exhausted candidates without completed video", feed_url)
     if not settings.dry_run and all_posting_ok and newest_completed_pub and (baseline is None or newest_completed_pub > baseline):
         db.set_feed_baseline(feed_url, newest_completed_pub)
-    return processed
+    return attempted
 
 
 def poll_once(settings: WorkerSettings, db: Database, summarizer: GeminiSummarizer, config: dict, transcript_settings):

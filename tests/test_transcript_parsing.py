@@ -18,6 +18,7 @@ from transcript_providers import (  # noqa: E402
     cookiefile_from_env,
     parse_json3_to_segments,
     parse_vtt_to_segments,
+    settings_from_env,
 )
 
 
@@ -136,6 +137,34 @@ https://proxy.example.com:443, socks5://9.9.9.9:1080 garbage
         _record_proxy_success(bad_proxy)
 
         self.assertEqual(_next_usable_proxy("test", next_proxy, settings), bad_proxy)
+
+    def test_persistent_proxy_memory_skips_unavailable_proxy(self):
+        class Memory:
+            def proxy_available(self, proxy_url):
+                return proxy_url != "http://1.2.3.4:8080"
+
+        settings = TranscriptSettings(proxy_selection_attempts=3)
+        proxies = ["http://1.2.3.4:8080", "http://5.6.7.8:3128"]
+        calls = {"index": -1}
+
+        def next_proxy():
+            calls["index"] = (calls["index"] + 1) % len(proxies)
+            return proxies[calls["index"]]
+
+        self.assertEqual(
+            _next_usable_proxy("test", next_proxy, settings, proxy_memory=Memory()),
+            "http://5.6.7.8:3128",
+        )
+
+    def test_ytdlp_proxy_retries_default_to_disabled(self):
+        import os
+
+        original = os.environ.pop("TRANSCRIPT_PROXY_YTDLP_ENABLED", None)
+        try:
+            self.assertFalse(settings_from_env().proxy_ytdlp_enabled)
+        finally:
+            if original is not None:
+                os.environ["TRANSCRIPT_PROXY_YTDLP_ENABLED"] = original
 
 
 if __name__ == "__main__":
