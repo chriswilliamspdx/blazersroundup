@@ -32,6 +32,8 @@ UTC = tz.UTC
 YOUTUBE_FEED_USER_AGENT = (
     "Mozilla/5.0 (compatible; BlazersRoundupBot/1.0; +https://github.com/chriswilliamspdx/blazersroundup)"
 )
+FEED_MODES = ("national", "blazers", "high_volume")
+HIGH_VOLUME_METADATA_EXCLUDED_KEYWORDS = {"portland"}
 
 
 def log(*args):
@@ -67,6 +69,14 @@ class WorkerSettings:
     transcript_max_attempts: int
     max_videos_per_feed: int
     max_feed_candidate_fallbacks: int
+    national_max_recent_videos_per_feed: int
+    blazers_max_recent_videos_per_feed: int
+    high_volume_max_recent_videos_per_feed: int
+    recent_lookback_hours: int
+    national_lookback_hours: int | None
+    blazers_lookback_hours: int | None
+    high_volume_lookback_hours: int | None
+    youtube_recent_api_enabled: bool
     max_transient_failures_per_feed: int
     max_videos_per_poll: int
     summary_post_char_limit: int
@@ -107,6 +117,20 @@ class WorkerSettings:
             transcript_max_attempts=int(os.getenv("TRANSCRIPT_MAX_ATTEMPTS", "5")),
             max_videos_per_feed=int(os.getenv("MAX_VIDEOS_PER_FEED", "1")),
             max_feed_candidate_fallbacks=int(os.getenv("MAX_FEED_CANDIDATE_FALLBACKS", "15")),
+            national_max_recent_videos_per_feed=int(os.getenv("NATIONAL_MAX_RECENT_VIDEOS_PER_FEED", "25")),
+            blazers_max_recent_videos_per_feed=int(os.getenv("BLAZERS_MAX_RECENT_VIDEOS_PER_FEED", "15")),
+            high_volume_max_recent_videos_per_feed=int(os.getenv("HIGH_VOLUME_MAX_RECENT_VIDEOS_PER_FEED", "75")),
+            recent_lookback_hours=int(os.getenv("RECENT_LOOKBACK_HOURS", os.getenv("MENTION_LOOKBACK_HOURS", "24"))),
+            national_lookback_hours=(
+                int(os.environ["NATIONAL_LOOKBACK_HOURS"]) if os.getenv("NATIONAL_LOOKBACK_HOURS") else None
+            ),
+            blazers_lookback_hours=(
+                int(os.environ["BLAZERS_LOOKBACK_HOURS"]) if os.getenv("BLAZERS_LOOKBACK_HOURS") else None
+            ),
+            high_volume_lookback_hours=(
+                int(os.environ["HIGH_VOLUME_LOOKBACK_HOURS"]) if os.getenv("HIGH_VOLUME_LOOKBACK_HOURS") else None
+            ),
+            youtube_recent_api_enabled=os.getenv("YOUTUBE_RECENT_API_ENABLED", "1") == "1",
             max_transient_failures_per_feed=int(os.getenv("MAX_TRANSIENT_FAILURES_PER_FEED", "2")),
             max_videos_per_poll=int(os.getenv("MAX_VIDEOS_PER_POLL", "40")),
             summary_post_char_limit=int(os.getenv("SUMMARY_POST_CHAR_LIMIT", "250")),
@@ -624,6 +648,70 @@ def yt_channel_feed_url(channel_id: str) -> str:
     return f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
 
 
+def normalize_youtube_handle(value: str | None) -> str | None:
+    value = (value or "").strip()
+    if not value:
+        return None
+    match = re.search(r"youtube\.com/@(?P<handle>[^/?#]+)", value)
+    if match:
+        value = match.group("handle")
+    value = value.rstrip("/")
+    if not value:
+        return None
+    return value if value.startswith("@") else f"@{value}"
+
+
+def youtube_handle_state_key(handle: str) -> str:
+    digest = hashlib.sha1(handle.lower().encode("utf-8")).hexdigest()
+    return f"youtube_channel_id:{digest}"
+
+
+def resolve_youtube_channel_id(settings: WorkerSettings, db: Database, feed: dict) -> str | None:
+    channel_id = (feed.get("youtube_channel_id") or "").strip()
+    if channel_id:
+        return channel_id
+
+    handle = normalize_youtube_handle(feed.get("youtube_handle") or feed.get("youtube_channel_url"))
+    if not handle:
+        return None
+
+    cached = db.get_state(youtube_handle_state_key(handle))
+    if cached:
+        return cached
+
+    if not settings.youtube_api_key:
+        dlog(settings, "YouTube handle resolve unavailable: missing YOUTUBE_API_KEY", handle)
+        return None
+
+    params = {
+        "part": "id",
+        "forHandle": handle,
+        "key": settings.youtube_api_key,
+    }
+    try:
+        response = requests.get("https://www.googleapis.com/youtube/v3/channels", params=params, timeout=15)
+        payload = response.json()
+    except Exception as exc:
+        dlog(settings, "YouTube handle resolve failed", handle, exc.__class__.__name__, str(exc))
+        return None
+
+    if response.status_code != 200:
+        error = payload.get("error", {}) if isinstance(payload, dict) else {}
+        message = error.get("message") or response.text[:200]
+        dlog(settings, "YouTube handle resolve failed", handle, "status", response.status_code, message)
+        return None
+
+    items = payload.get("items") or []
+    channel_id = (items[0].get("id") if items else None) or ""
+    if not channel_id:
+        dlog(settings, "YouTube handle resolve returned no channel", handle)
+        return None
+
+    db.set_state(youtube_handle_state_key(handle), channel_id)
+    dlog(settings, "YouTube handle resolved", handle, channel_id)
+    return channel_id
+
+
 def youtube_uploads_playlist_id(channel_id: str) -> str | None:
     channel_id = (channel_id or "").strip()
     if not channel_id.startswith("UC") or len(channel_id) < 3:
@@ -646,6 +734,7 @@ def youtube_api_item_to_entry(item: dict) -> dict | None:
         "yt_videoid": video_id,
         "link": youtube_link(video_id),
         "title": title,
+        "description": snippet.get("description") or "",
         "published": published,
     }
 
@@ -767,32 +856,44 @@ def fetch_youtube_api_entries(settings: WorkerSettings, channel_id: str, max_res
         dlog(settings, "YouTube API fallback unavailable: unsupported channel id", channel_id)
         return [], {"status": None, "items": 0, "error": "unsupported_channel_id"}
 
-    params = {
-        "part": "snippet,contentDetails",
-        "playlistId": playlist_id,
-        "maxResults": max(1, min(int(max_results or 5), 10)),
-        "key": settings.youtube_api_key,
-    }
-    try:
-        response = requests.get("https://www.googleapis.com/youtube/v3/playlistItems", params=params, timeout=15)
-        payload = response.json()
-    except Exception as exc:
-        dlog(settings, "YouTube API fallback failed", channel_id, exc.__class__.__name__, str(exc))
-        return [], {"status": None, "items": 0, "error": f"{exc.__class__.__name__}: {exc}"}
-
-    if response.status_code != 200:
-        error = payload.get("error", {}) if isinstance(payload, dict) else {}
-        message = error.get("message") or response.text[:200]
-        dlog(settings, "YouTube API fallback failed", channel_id, "status", response.status_code, message)
-        return [], {"status": response.status_code, "items": 0, "error": message}
-
+    target = max(1, int(max_results or 5))
     entries = []
-    for item in payload.get("items", []):
-        entry = youtube_api_item_to_entry(item)
-        if entry:
-            entries.append(entry)
-    dlog(settings, "YouTube API fallback", channel_id, "entries", len(entries), "status", response.status_code)
-    return entries, {"status": response.status_code, "items": len(entries), "error": None}
+    page_token = None
+    last_status = None
+
+    while len(entries) < target:
+        params = {
+            "part": "snippet,contentDetails",
+            "playlistId": playlist_id,
+            "maxResults": max(1, min(target - len(entries), 50)),
+            "key": settings.youtube_api_key,
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        try:
+            response = requests.get("https://www.googleapis.com/youtube/v3/playlistItems", params=params, timeout=15)
+            payload = response.json()
+        except Exception as exc:
+            dlog(settings, "YouTube API fallback failed", channel_id, exc.__class__.__name__, str(exc))
+            return entries, {"status": last_status, "items": len(entries), "error": f"{exc.__class__.__name__}: {exc}"}
+
+        last_status = response.status_code
+        if response.status_code != 200:
+            error = payload.get("error", {}) if isinstance(payload, dict) else {}
+            message = error.get("message") or response.text[:200]
+            dlog(settings, "YouTube API fallback failed", channel_id, "status", response.status_code, message)
+            return entries, {"status": response.status_code, "items": len(entries), "error": message}
+
+        for item in payload.get("items", []):
+            entry = youtube_api_item_to_entry(item)
+            if entry:
+                entries.append(entry)
+        page_token = payload.get("nextPageToken")
+        if not page_token:
+            break
+
+    dlog(settings, "YouTube API fallback", channel_id, "entries", len(entries), "status", last_status)
+    return entries, {"status": last_status, "items": len(entries), "error": None}
 
 
 def fetch_youtube_completed_stream_entries(
@@ -811,7 +912,7 @@ def fetch_youtube_completed_stream_entries(
         "eventType": "completed",
         "type": "video",
         "order": "date",
-        "maxResults": max(1, min(int(max_results or 5), 10)),
+        "maxResults": max(1, min(int(max_results or 5), 50)),
         "key": settings.youtube_api_key,
     }
     if published_after:
@@ -898,6 +999,8 @@ def fetch_youtube_video_statuses(settings: WorkerSettings, video_ids: list[str])
                 statuses[video_id] = {
                     "live_broadcast_content": snippet.get("liveBroadcastContent") or "none",
                     "actual_end_time": live_details.get("actualEndTime"),
+                    "title": snippet.get("title") or "",
+                    "description": snippet.get("description") or "",
                 }
     if statuses:
         dlog(settings, "YouTube video metadata", len(statuses), "videos")
@@ -910,6 +1013,68 @@ def video_is_live_or_upcoming(status: dict | None) -> bool:
     live_content = str(status.get("live_broadcast_content") or "none").lower()
     actual_end_time = status.get("actual_end_time")
     return live_content in ("live", "upcoming") and not actual_end_time
+
+
+def feed_rule(config: dict, mode: str) -> dict:
+    return (config.get("feed_rules") or {}).get(mode, {}) or {}
+
+
+def mode_lookback_hours(settings: WorkerSettings, config: dict, feed: dict, mode: str) -> int:
+    if feed.get("lookback_hours") is not None:
+        return max(1, int(feed["lookback_hours"]))
+
+    env_value = {
+        "national": getattr(settings, "national_lookback_hours", None),
+        "blazers": getattr(settings, "blazers_lookback_hours", None),
+        "high_volume": getattr(settings, "high_volume_lookback_hours", None),
+    }.get(mode)
+    if env_value is not None:
+        return max(1, int(env_value))
+
+    rule_value = feed_rule(config, mode).get("lookback_hours")
+    if rule_value is not None:
+        return max(1, int(rule_value))
+
+    return max(1, int(getattr(settings, "recent_lookback_hours", 24)))
+
+
+def mode_recent_limit(settings: WorkerSettings, feed: dict, mode: str) -> int:
+    if feed.get("max_recent_videos_per_feed") is not None:
+        return max(1, int(feed["max_recent_videos_per_feed"]))
+    if mode == "national":
+        return max(1, int(getattr(settings, "national_max_recent_videos_per_feed", 25)))
+    if mode == "blazers":
+        return max(1, int(getattr(settings, "blazers_max_recent_videos_per_feed", 15)))
+    if mode == "high_volume":
+        return max(1, int(getattr(settings, "high_volume_max_recent_videos_per_feed", 75)))
+    return max(1, int(getattr(settings, "max_videos_per_feed", 1)))
+
+
+def entry_metadata_text(entry, video_status: dict | None = None) -> str:
+    status = video_status or {}
+    parts = [
+        entry.get("title") or status.get("title") or "",
+        entry.get("description") or "",
+        entry.get("media_description") or "",
+        entry.get("summary") or "",
+        status.get("description") or "",
+    ]
+    return " ".join(str(part or "") for part in parts)
+
+
+def metadata_keywords(config: dict, mode: str) -> list[str]:
+    keywords = [str(keyword).strip().lower() for keyword in config.get("keywords_positive", []) if str(keyword).strip()]
+    if mode == "high_volume":
+        return [keyword for keyword in keywords if keyword not in HIGH_VOLUME_METADATA_EXCLUDED_KEYWORDS]
+    return keywords
+
+
+def metadata_has_keyword(config: dict, mode: str, entry, video_status: dict | None = None) -> bool:
+    keywords = metadata_keywords(config, mode)
+    if not keywords:
+        return False
+    start_seconds, _matched_text = first_keyword_hit([(0, 0, entry_metadata_text(entry, video_status))], keywords)
+    return start_seconds is not None
 
 
 def create_thread(
@@ -997,7 +1162,7 @@ def handle_video(
 ) -> str:
     guid = entry.get("id") or entry.get("link") or video_id
     published_at = parse_pubdate(entry)
-    title = (entry.get("title") or "").strip()
+    title = (entry.get("title") or (video_status or {}).get("title") or "").strip()
     keywords = [keyword.lower() for keyword in config.get("keywords_positive", [])]
     post_char_limit = int(config.get("post_char_limit", 300))
 
@@ -1007,6 +1172,12 @@ def handle_video(
     if db.already_seen(feed_url, guid, video_id):
         dlog(settings, "skip: already seen", video_id)
         return VIDEO_ALREADY_SEEN
+    if mode == "high_volume":
+        if not metadata_has_keyword(config, mode, entry, video_status):
+            dlog(settings, "skip high-volume: no metadata keyword hit", video_id)
+            maybe_mark_seen(settings, db, feed_url, guid, video_id, published_at)
+            return VIDEO_OK
+        dlog(settings, "high-volume metadata hit: transcript scan", video_id)
     cooldown_until = db.llm_cooldown_active()
     if cooldown_until:
         poll_context.llm_wait = True
@@ -1111,7 +1282,7 @@ def handle_video(
     link = youtube_link(video_id, jump_seconds)
     title_part = title or "New podcast episode"
     heading = f"{show_name} - {title_part}" if show_name else title_part
-    if mode == "national":
+    if mode in ("national", "high_volume"):
         timestamp = fmt_hhmmss(jump_seconds)
         first_text = f"{link}\nBlazers conversation starts at {timestamp}. Video link timestamped."
     else:
@@ -1143,10 +1314,17 @@ def process_channel(
     feed: dict,
     mode: str,
 ):
-    channel_id = feed.get("youtube_channel_id")
+    channel_id = resolve_youtube_channel_id(settings, db, feed)
     show_name = (feed.get("show_name") or feed.get("youtube_search") or "").strip()
     if show_name.lower().startswith(("http://", "https://")):
         show_name = ""
+    if not channel_id:
+        log(f"skip {mode} feed without youtube_channel_id", feed.get("youtube_search") or feed.get("youtube_channel_url") or feed.get("rss"))
+        return 0
+
+    mode_limit = mode_recent_limit(settings, feed, mode)
+    lookback_hours = mode_lookback_hours(settings, config, feed, mode)
+    lookback_cutoff = datetime.now(UTC) - timedelta(hours=lookback_hours)
     feed_url = yt_channel_feed_url(channel_id)
     parsed, feed_meta = fetch_youtube_feed(settings, feed_url)
     rss_entries = list(parsed.entries)
@@ -1165,12 +1343,13 @@ def process_channel(
     )
 
     api_entries = []
-    if not rss_entries:
-        api_entries, api_meta = fetch_youtube_api_entries(settings, channel_id, settings.max_feed_candidate_fallbacks)
+    api_limit = max(settings.max_feed_candidate_fallbacks, mode_limit)
+    if settings.youtube_recent_api_enabled:
+        api_entries, api_meta = fetch_youtube_api_entries(settings, channel_id, api_limit)
         if api_entries:
             dlog(
                 settings,
-                "feed fallback",
+                "feed recent api",
                 feed_url,
                 "source",
                 "youtube-data-api",
@@ -1184,11 +1363,11 @@ def process_channel(
     if settings.youtube_completed_streams_enabled and feed.get("scan_streams"):
         baseline = db.get_feed_baseline(feed_url)
         if stream_scan_due(settings, db, channel_id):
-            published_after = baseline - timedelta(days=2) if baseline else None
+            published_after = max(baseline, lookback_cutoff) if baseline else lookback_cutoff
             stream_entries, stream_meta = fetch_youtube_completed_stream_entries(
                 settings,
                 channel_id,
-                settings.max_feed_candidate_fallbacks,
+                api_limit,
                 published_after=published_after,
             )
             if stream_entries:
@@ -1209,38 +1388,36 @@ def process_channel(
 
     entries = merge_youtube_entries(rss_entries, api_entries, stream_entries)
     if not entries:
-        return
+        return 0
 
     rows = build_rows(entries)
     if not rows:
         dlog(settings, "feed has no parseable video ids", feed_url)
-        return
+        return 0
 
     baseline = db.get_feed_baseline(feed_url)
-    latest = rows[0]
-    latest_pub, _latest_entry, latest_video_id = latest
-    if baseline is None or latest_pub > baseline or db.has_due_transcript_retry(latest_video_id, settings.transcript_max_attempts):
-        candidates = [
-            row
-            for row in rows[: settings.max_feed_candidate_fallbacks]
-            if baseline is None or row[0] > baseline or row[2] == latest_video_id
-        ]
-    else:
-        candidates = []
+    candidates = [row for row in rows if row[0] >= lookback_cutoff][:mode_limit]
 
-    dlog(settings, "candidates", len(candidates), "baseline", baseline.isoformat() if baseline else None)
-    first_run_feed = baseline is None
-    all_posting_ok = True
+    dlog(
+        settings,
+        "candidates",
+        len(candidates),
+        "baseline",
+        baseline.isoformat() if baseline else None,
+        "lookback_hours",
+        lookback_hours,
+        "limit",
+        mode_limit,
+    )
     completed = 0
     attempted = 0
     transient_failures = 0
     newest_completed_pub = None
-    first_run_anchor_pub = None
     video_statuses = fetch_youtube_video_statuses(settings, [row[2] for row in candidates])
     for published_at, entry, video_id in candidates:
         if poll_context.llm_wait:
             break
-        if completed >= settings.max_videos_per_feed:
+        if completed >= mode_limit:
             break
         outcome = handle_video(
             settings,
@@ -1259,39 +1436,26 @@ def process_channel(
         if outcome == VIDEO_SKIP_CANDIDATE:
             continue
         if outcome == VIDEO_ALREADY_SEEN:
-            if first_run_feed:
-                first_run_anchor_pub = published_at
-                dlog(settings, "first-run baseline anchor already seen", video_id)
-                break
             continue
         if outcome == VIDEO_NOT_DUE:
             dlog(settings, "skip candidate: retry not due", video_id)
-            all_posting_ok = False
             continue
         attempted += 1
         if outcome == VIDEO_OK:
             completed += 1
             newest_completed_pub = published_at if newest_completed_pub is None else max(newest_completed_pub, published_at)
-            if first_run_feed:
-                first_run_anchor_pub = newest_completed_pub
             dlog(settings, "feed completed candidate", video_id)
-            break
+            continue
         if outcome == VIDEO_RETRY_LATER and not poll_context.llm_wait:
             transient_failures += 1
-            all_posting_ok = False
             dlog(settings, "feed transient candidate", video_id, transient_failures)
             if transient_failures < settings.max_transient_failures_per_feed:
                 continue
-        else:
-            all_posting_ok = False
         break
 
-    if candidates and completed == 0 and first_run_anchor_pub is None and not poll_context.llm_wait:
+    if candidates and completed == 0 and not poll_context.llm_wait:
         dlog(settings, "feed exhausted candidates without completed video", feed_url)
-    if not settings.dry_run and first_run_feed and first_run_anchor_pub:
-        db.set_feed_baseline(feed_url, first_run_anchor_pub)
-        dlog(settings, "first-run baseline set", feed_url, first_run_anchor_pub.isoformat())
-    elif not settings.dry_run and all_posting_ok and newest_completed_pub and newest_completed_pub > baseline:
+    if not settings.dry_run and newest_completed_pub and (baseline is None or newest_completed_pub > baseline):
         db.set_feed_baseline(feed_url, newest_completed_pub)
     return attempted
 
@@ -1308,22 +1472,21 @@ def poll_once(settings: WorkerSettings, db: Database, summarizer: GeminiSummariz
     log("polling...")
     remaining = settings.max_videos_per_poll
     feed_groups = []
-    if settings.feed_mode in ("all", "national"):
+    enabled_modes = set(FEED_MODES if settings.feed_mode == "all" else [item.strip() for item in settings.feed_mode.split(",")])
+    if "national" in enabled_modes:
         feed_groups.append(("national_feeds", "national"))
-    if settings.feed_mode in ("all", "blazers"):
+    if "blazers" in enabled_modes:
         feed_groups.append(("blazers_feeds", "blazers"))
+    if "high_volume" in enabled_modes:
+        feed_groups.append(("high_volume_feeds", "high_volume"))
     if not feed_groups:
-        raise RuntimeError("FEED_MODE must be one of: all, national, blazers")
+        raise RuntimeError("FEED_MODE must be one of: all, national, blazers, high_volume, or a comma-separated subset")
 
     for config_key, mode in feed_groups:
         for feed in config.get(config_key, []):
             if remaining <= 0:
                 log("poll video budget reached")
                 return
-            channel_id = feed.get("youtube_channel_id")
-            if not channel_id:
-                log(f"skip {mode} feed without youtube_channel_id", feed.get("youtube_search") or feed.get("rss"))
-                continue
             remaining -= process_channel(settings, db, summarizer, config, transcript_settings, poll_context, feed, mode) or 0
             if poll_context.llm_wait:
                 if poll_context.llm_wait_reason == "budget":

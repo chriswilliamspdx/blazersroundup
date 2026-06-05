@@ -68,7 +68,7 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `GEMINI_API_KEY`
 - `GEMINI_MODEL` = `gemini-3.1-flash-lite` (recommended; default remains `gemini-2.5-flash-lite`)
 - `GEMINI_THINKING_LEVEL` = `low` for Gemini 3 models (optional)
-- `YOUTUBE_API_KEY` = YouTube Data API v3 key for newest-video lookup when RSS fails (optional but recommended on Railway)
+- `YOUTUBE_API_KEY` = YouTube Data API v3 key for handle resolution, recent-video lookup, metadata, and livestream checks (recommended)
 - `LLM_MAX_CALLS_PER_POLL` = 10 (optional, lower to 3-5 while testing)
 - `LLM_RETRY_MINUTES` = 60 (optional)
 - `LLM_MAX_ATTEMPTS` = 5 (optional)
@@ -80,9 +80,17 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `FORCE_TRANSCRIPT_RETRY` = 1 to ignore saved transcript cooldowns for one test run
 - `RESET_FEED_STATE` = 1 to clear feed baselines and transcript retry state on startup; remove after one deploy
 - `RESET_LLM_STATE` = 1 to clear Gemini cooldown and summary retry state on startup; remove after one deploy
-- `FEED_MODE` = `all`, `national`, or `blazers` (optional, use `blazers` while testing)
-- `MAX_VIDEOS_PER_FEED` = 1 (optional; the worker only considers the newest episode per feed)
-- `MAX_FEED_CANDIDATE_FALLBACKS` = 15 (optional; lets the worker step past live/upcoming, already-seen, or retry-not-due videos)
+- `FEED_MODE` = `all`, `national`, `blazers`, `high_volume`, or a comma-separated subset (optional, use `blazers` while testing)
+- `RECENT_LOOKBACK_HOURS` = 24 (optional default for recent-window feed scans)
+- `NATIONAL_LOOKBACK_HOURS` = 24 (optional override)
+- `BLAZERS_LOOKBACK_HOURS` = 24 (optional override)
+- `HIGH_VOLUME_LOOKBACK_HOURS` = 24 (optional override)
+- `NATIONAL_MAX_RECENT_VIDEOS_PER_FEED` = 25 (optional; last-24h national videos to inspect per channel)
+- `BLAZERS_MAX_RECENT_VIDEOS_PER_FEED` = 15 (optional; last-24h Blazers videos to summarize per channel)
+- `HIGH_VOLUME_MAX_RECENT_VIDEOS_PER_FEED` = 75 (optional; last-24h high-volume metadata items to inspect per channel)
+- `YOUTUBE_RECENT_API_ENABLED` = 1 (optional; use YouTube Data API to scan beyond RSS's newest entries)
+- `MAX_VIDEOS_PER_FEED` = 1 (legacy fallback; recent-window feeds use the group-specific caps above)
+- `MAX_FEED_CANDIDATE_FALLBACKS` = 15 (optional; minimum API/RSS candidate depth for stepping past live/upcoming, already-seen, or retry-not-due videos)
 - `MAX_TRANSIENT_FAILURES_PER_FEED` = 2 (optional; max blocked/failing transcript attempts before moving to the next channel)
 - `MAX_VIDEOS_PER_POLL` = 40 (optional, lower to 5-10 while testing)
 - `SUMMARY_POST_CHAR_LIMIT` = 250 (optional)
@@ -131,6 +139,8 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 
 Use a dedicated YouTube account for cookies, not your primary personal account.
 Free proxy retries are focused on `youtube-transcript-api`; keep `TRANSCRIPT_PROXY_YTDLP_ENABLED=0` unless you intentionally want cookie-backed `yt-dlp` to use proxies.
+
+`national_feeds` and `blazers_feeds` scan recent archived videos from the lookback window. `high_volume_feeds` scans recent video metadata first and only fetches transcripts when the title/description/metadata has a Blazers keyword hit.
 
 Feeds can opt into completed livestream discovery with `scan_streams: true`. This uses the YouTube Data API search endpoint, so enable it only for channels where archived streams matter.
 

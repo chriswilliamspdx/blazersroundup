@@ -87,6 +87,19 @@ keywords_positive:
 - tom dundon
 exclude_note: All detections must be in the NBA Portland Trail Blazers context (no
   generic 'trailblazer' meanings).
+feed_rules:
+  national:
+    lookback_hours: 24
+    scan_strategy: transcript_recent
+    post_format: national
+  blazers:
+    lookback_hours: 24
+    scan_strategy: post_recent
+    post_format: blazers
+  high_volume:
+    lookback_hours: 24
+    scan_strategy: metadata_then_transcript
+    post_format: national
 national_feeds:
 - rss: https://feeds.megaphone.fm/zach-lowe
   youtube_search: The Zach Lowe Show
@@ -149,6 +162,33 @@ national_feeds:
 - rss: https://www.spreaker.com/show/3211931/episodes/feed
   youtube_search: Fastbreak Breakfast NBA Podcast
   youtube_channel_id: UCt9OPdYh9weYNaYnF7ROZEQ
+- youtube_search: Hoops Tonight
+  youtube_handle: '@HoopsTonight'
+  youtube_channel_url: https://www.youtube.com/@HoopsTonight
+- youtube_search: ALL NBA Podcast
+  youtube_handle: '@ALLCITY_NBA'
+  youtube_channel_url: https://www.youtube.com/@ALLCITY_NBA
+- youtube_search: Numbers On The Board
+  youtube_handle: '@numbersontheboard'
+  youtube_channel_url: https://www.youtube.com/@numbersontheboard
+- youtube_search: Nerd Sesh
+  youtube_handle: '@Nerd_Sesh'
+  youtube_channel_url: https://www.youtube.com/@Nerd_Sesh
+- youtube_search: Mind the Game Podcast
+  youtube_handle: '@MindTheGamePodcast'
+  youtube_channel_url: https://www.youtube.com/@MindTheGamePodcast
+- youtube_search: The Arena
+  youtube_handle: '@TheArena0'
+  youtube_channel_url: https://www.youtube.com/@TheArena0
+- youtube_search: Run It Back
+  youtube_handle: '@RunItBackFDTV'
+  youtube_channel_url: https://www.youtube.com/@RunItBackFDTV
+- youtube_search: What's Wright? with Nick Wright
+  youtube_handle: '@WhatsWrightShow'
+  youtube_channel_url: https://www.youtube.com/@WhatsWrightShow
+- youtube_search: The Old Man and the Three
+  youtube_handle: '@OLDMANANDTHREE'
+  youtube_channel_url: https://www.youtube.com/@OLDMANANDTHREE
 blazers_feeds:
 - rss: http://feeds.megaphone.fm/lockedonblazers
   show_name: Locked On Blazers
@@ -181,3 +221,69 @@ blazers_feeds:
 - rss: https://feeds.megaphone.fm/ROMN6537468398
   youtube_search: We Like the Blazers
   youtube_channel_id: UCYvinFUqrrxarIqPU5trZig
+- youtube_search: Rip City Rundown
+  youtube_handle: '@rcr.trivia'
+  youtube_channel_url: https://www.youtube.com/@rcr.trivia
+- youtube_search: Blazers Are Cool
+  youtube_handle: '@blazersarecool'
+  youtube_channel_url: https://www.youtube.com/@blazersarecool
+- youtube_search: Wake Up Rip City
+  youtube_handle: '@wakeupripcity'
+  youtube_channel_url: https://www.youtube.com/@wakeupripcity
+high_volume_feeds:
+- youtube_search: KGW News
+  youtube_handle: '@KGWNews8'
+  youtube_channel_url: https://www.youtube.com/@KGWNews8
+  feed_note: local tv, metadata filter only
+- youtube_search: KATU News
+  youtube_handle: '@KATUNews'
+  youtube_channel_url: https://www.youtube.com/@KATUNews
+  feed_note: local tv, metadata filter only
+- youtube_search: KOIN 6
+  youtube_handle: '@KOINLOCAL6'
+  youtube_channel_url: https://www.youtube.com/@KOINLOCAL6
+  feed_note: local tv, metadata filter only
+- youtube_search: Fox 12 Oregon
+  youtube_handle: '@Fox12oregon'
+  youtube_channel_url: https://www.youtube.com/@Fox12oregon
+  feed_note: local tv, metadata filter only
+- youtube_search: 105.1 The Fan
+  youtube_handle: '@1051TheFan'
+  youtube_channel_url: https://www.youtube.com/@1051TheFan
+  feed_note: local radio, metadata filter only
+- youtube_search: The Game Portland Sports Radio
+  youtube_handle: '@TheGame-PortlandsSportsRadio'
+  youtube_channel_url: https://www.youtube.com/@TheGame-PortlandsSportsRadio
+  feed_note: local radio, metadata filter only
+- youtube_search: Rip City Radio
+  youtube_handle: '@ripcityradio'
+  youtube_channel_url: https://www.youtube.com/@ripcityradio
+  feed_note: local radio, metadata filter only
+- youtube_search: ESPN
+  youtube_handle: '@espn'
+  youtube_channel_url: https://www.youtube.com/@espn
+  feed_note: national tv, metadata filter only
+- youtube_search: FOX Sports
+  youtube_handle: '@foxsports'
+  youtube_channel_url: https://www.youtube.com/@foxsports
+  feed_note: national tv, metadata filter only
+- youtube_search: CBS Sports
+  youtube_handle: '@CBSSports'
+  youtube_channel_url: https://www.youtube.com/@CBSSports
+  feed_note: national tv, metadata filter only
+- youtube_search: NBC Sports
+  youtube_handle: '@NBCSports'
+  youtube_channel_url: https://www.youtube.com/@NBCSports
+  feed_note: national tv, metadata filter only
+- youtube_search: NBA
+  youtube_handle: '@NBA'
+  youtube_channel_url: https://www.youtube.com/@NBA
+  feed_note: national tv, metadata filter only
+- youtube_search: NBA on NBC
+  youtube_handle: '@NBAonNBC'
+  youtube_channel_url: https://www.youtube.com/@NBAonNBC
+  feed_note: national tv, metadata filter only
+- youtube_search: Sports on Prime
+  youtube_handle: '@SportsOnPrime'
+  youtube_channel_url: https://www.youtube.com/@SportsOnPrime
+  feed_note: national tv, metadata filter only

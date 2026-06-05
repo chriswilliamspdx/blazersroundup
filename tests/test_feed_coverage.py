@@ -15,6 +15,7 @@ class FakeDb:
     def __init__(self):
         self.baseline = None
         self.stream_scan_state = {}
+        self.seen = set()
 
     def get_feed_baseline(self, _feed_url):
         return self.baseline
@@ -31,6 +32,21 @@ class FakeDb:
     def set_state(self, key, value):
         self.stream_scan_state[key] = value
 
+    def already_seen(self, _feed_url, _guid, media_id):
+        return media_id in self.seen
+
+    def mark_seen(self, _feed_url, _guid, media_id, _published_at):
+        self.seen.add(media_id)
+
+    def llm_cooldown_active(self):
+        return None
+
+    def summary_retry_ready(self, _video_id, _max_attempts):
+        return True
+
+    def transcript_retry_ready(self, _video_id, _max_attempts):
+        return True
+
 
 def settings(**overrides):
     base = {
@@ -39,7 +55,15 @@ def settings(**overrides):
         "max_feed_candidate_fallbacks": 5,
         "max_transient_failures_per_feed": 2,
         "max_videos_per_feed": 1,
+        "national_max_recent_videos_per_feed": 25,
+        "blazers_max_recent_videos_per_feed": 15,
+        "high_volume_max_recent_videos_per_feed": 75,
+        "recent_lookback_hours": 999999,
+        "national_lookback_hours": None,
+        "blazers_lookback_hours": None,
+        "high_volume_lookback_hours": None,
         "transcript_max_attempts": 5,
+        "youtube_recent_api_enabled": False,
         "youtube_completed_streams_enabled": False,
         "youtube_metadata_check_enabled": False,
         "youtube_api_key": None,
@@ -91,7 +115,7 @@ class FeedCoverageTests(unittest.TestCase):
         self.assertEqual(calls, ["newest1", "second2"])
         self.assertEqual(processed, 1)
 
-    def test_first_run_retry_not_due_then_success_sets_baseline(self):
+    def test_recent_window_processes_multiple_new_videos(self):
         db = FakeDb()
         calls = []
         entries = [
@@ -121,12 +145,13 @@ class FeedCoverageTests(unittest.TestCase):
                 mode="blazers",
             )
 
-        self.assertEqual(calls, ["newest1", "second2"])
-        self.assertEqual(processed, 1)
+        self.assertEqual(calls, ["newest1", "second2", "oldest3"])
+        self.assertEqual(processed, 2)
         self.assertEqual(db.baseline.isoformat(), "2026-06-04T11:00:00+00:00")
 
-    def test_first_run_already_seen_sets_baseline_without_backfill(self):
+    def test_seen_videos_do_not_block_other_recent_candidates(self):
         db = FakeDb()
+        db.seen.add("newest1")
         calls = []
         entries = [
             entry("newest1", "2026-06-04T12:00:00Z"),
@@ -136,7 +161,7 @@ class FeedCoverageTests(unittest.TestCase):
         def fake_handle(*args, **kwargs):
             video_id = args[-1]
             calls.append(video_id)
-            return main.VIDEO_ALREADY_SEEN
+            return main.VIDEO_ALREADY_SEEN if video_id == "newest1" else main.VIDEO_OK
 
         with patch.object(main, "fetch_youtube_feed", return_value=(SimpleNamespace(entries=entries), {})), patch.object(
             main, "fetch_youtube_api_entries", return_value=([], {})
@@ -154,9 +179,9 @@ class FeedCoverageTests(unittest.TestCase):
                 mode="blazers",
             )
 
-        self.assertEqual(calls, ["newest1"])
-        self.assertEqual(processed, 0)
-        self.assertEqual(db.baseline.isoformat(), "2026-06-04T12:00:00+00:00")
+        self.assertEqual(calls, ["newest1", "second2"])
+        self.assertEqual(processed, 1)
+        self.assertEqual(db.baseline.isoformat(), "2026-06-04T11:00:00+00:00")
 
     def test_completed_stream_entries_merge_with_upload_entries(self):
         upload = entry("upload1", "2026-06-04T10:00:00Z")
@@ -184,6 +209,51 @@ class FeedCoverageTests(unittest.TestCase):
         )
 
         self.assertEqual(outcome, main.VIDEO_SKIP_CANDIDATE)
+
+    def test_high_volume_metadata_miss_skips_before_transcript_attempt(self):
+        db = FakeDb()
+
+        with patch.object(main, "fetch_transcript") as fetch_transcript:
+            outcome = main.handle_video(
+                settings(dry_run=False),
+                db=db,
+                summarizer=None,
+                config={"keywords_positive": ["blazers", "shaedon sharpe"], "post_char_limit": 300},
+                transcript_settings=None,
+                poll_context=main.PollContext(llm_limit=5),
+                feed_url="feed",
+                show_name="show",
+                mode="high_volume",
+                entry=entry("news01", "2026-06-04T12:00:00Z", title="Morning headlines"),
+                video_id="news01",
+                video_status={"live_broadcast_content": "none", "actual_end_time": None, "description": "Traffic and weather."},
+            )
+
+        fetch_transcript.assert_not_called()
+        self.assertEqual(outcome, main.VIDEO_OK)
+        self.assertIn("news01", db.seen)
+
+    def test_high_volume_metadata_gate_ignores_generic_portland(self):
+        db = FakeDb()
+
+        with patch.object(main, "fetch_transcript") as fetch_transcript:
+            outcome = main.handle_video(
+                settings(dry_run=False),
+                db=db,
+                summarizer=None,
+                config={"keywords_positive": ["portland", "blazers"], "post_char_limit": 300},
+                transcript_settings=None,
+                poll_context=main.PollContext(llm_limit=5),
+                feed_url="feed",
+                show_name="show",
+                mode="high_volume",
+                entry=entry("news02", "2026-06-04T12:00:00Z", title="Portland morning headlines"),
+                video_id="news02",
+                video_status={"live_broadcast_content": "none", "actual_end_time": None},
+            )
+
+        fetch_transcript.assert_not_called()
+        self.assertEqual(outcome, main.VIDEO_OK)
 
 
 if __name__ == "__main__":
