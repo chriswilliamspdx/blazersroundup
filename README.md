@@ -117,6 +117,7 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `TRANSCRIPT_PROXY_REPUTATION_ENABLED` = 1 (optional; persists proxy health in Postgres)
 - `TRANSCRIPT_PROXY_GOOD_POOL_LIMIT` = 100 (optional; max known-good proxies to sample from)
 - `TRANSCRIPT_PROXY_GOOD_ATTEMPTS` = 1 (optional; known-good proxy attempts before fresh proxy sources)
+- `TRANSCRIPT_PROXY_GOOD_FIRST_RATIO` = 0.8 (optional; 80% known-good first, 20% fresh-probe first when both pools exist)
 - `TRANSCRIPT_PROXY_GOOD_REST_SECONDS` = 3600 (optional; rest known-good proxies after success)
 - `TRANSCRIPT_PROXY_RETIRE_AFTER_FAILURES` = 5 (optional; retire repeatedly broken proxies)
 - `TRANSCRIPT_PROXY_RETIRE_AFTER_BLOCKS` = 2 (optional; retire repeatedly YouTube-blocked proxies)
@@ -138,7 +139,16 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `YTDLP_EXTRACTOR_RETRIES` = 1 (optional)
 
 Use a dedicated YouTube account for cookies, not your primary personal account.
-Free proxy retries are focused on `youtube-transcript-api`; keep `TRANSCRIPT_PROXY_YTDLP_ENABLED=0` unless you intentionally want cookie-backed `yt-dlp` to use proxies.
+Free proxy retries are focused on `youtube-transcript-api`; keep `TRANSCRIPT_PROXY_YTDLP_ENABLED=0`. If cookies are configured, the worker will skip proxy-backed `yt-dlp` even if this variable is accidentally enabled, so YouTube account/session cookies do not go through free proxies.
+
+Proxy reputation is stored in `proxy_health`. Useful statuses are:
+
+- `good`: worked recently; may be resting if `cooldown_until` is in the future
+- `blocked`: YouTube blocked the proxy; it is skipped until cooldown expires or it retires
+- `purgatory`: failed for a non-YouTube-block reason; it can be retried after cooldown
+- `retired`: skipped permanently unless the row is manually cleared
+
+The worker logs a compact proxy health summary at the start of each poll when proxy reputation is enabled.
 
 `national_feeds` and `blazers_feeds` scan recent archived videos from the lookback window. `high_volume_feeds` scans recent video metadata first and only fetches transcripts when the title/description/metadata has a Blazers keyword hit.
 

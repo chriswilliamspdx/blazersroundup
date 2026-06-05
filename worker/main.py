@@ -426,6 +426,28 @@ class Database:
             [max(1, int(limit or 100))],
         )
 
+    def proxy_health_summary(self):
+        rows = self.exec(
+            """
+            select
+              count(*)::integer as total,
+              count(*) filter (
+                where status='good'
+                  and (cooldown_until is null or cooldown_until <= now())
+              )::integer as good_ready,
+              count(*) filter (
+                where status='good'
+                  and cooldown_until > now()
+              )::integer as good_resting,
+              count(*) filter (where status='blocked')::integer as blocked,
+              count(*) filter (where status in ('cooldown', 'purgatory'))::integer as purgatory,
+              count(*) filter (where status='retired')::integer as retired,
+              count(*) filter (where status='candidate')::integer as candidate
+            from proxy_health
+            """
+        )
+        return rows[0] if rows else {}
+
     def record_proxy_success(self, proxy_url: str, source: str, rest_seconds: int = 0):
         cooldown_until = None
         if rest_seconds > 0:
@@ -452,6 +474,13 @@ class Database:
             """,
             [proxy_url, source or "unknown", cooldown_until],
         )
+        rows = self.exec("select success_count, cooldown_until from proxy_health where proxy_url=%s", [proxy_url])
+        row = rows[0] if rows else {}
+        return {
+            "status": "good",
+            "success_count": row.get("success_count"),
+            "cooldown_until": row.get("cooldown_until"),
+        }
 
     def record_proxy_failure(
         self,
@@ -480,7 +509,7 @@ class Database:
             cooldown_until = datetime.now(UTC) + timedelta(seconds=max(0, blocked_cooldown_seconds) * multiplier)
             retired_at = None
         else:
-            status = "cooldown"
+            status = "purgatory"
             multiplier = min(4, 2 ** max(0, failure_count - 1))
             cooldown_until = datetime.now(UTC) + timedelta(seconds=max(0, bad_cooldown_seconds) * multiplier)
             retired_at = None
@@ -508,6 +537,13 @@ class Database:
             """,
             [proxy_url, source or "unknown", status, failure_count, blocked_count, error_type, cooldown_until, retired_at],
         )
+        return {
+            "status": status,
+            "failure_count": failure_count,
+            "blocked_count": blocked_count,
+            "cooldown_until": cooldown_until,
+            "retired_at": retired_at,
+        }
 
 
 class LLMError(Exception):
@@ -1470,6 +1506,26 @@ def poll_once(settings: WorkerSettings, db: Database, summarizer: GeminiSummariz
         log("Gemini poll budget is 0; skipping poll")
         return
     log("polling...")
+    if getattr(transcript_settings, "proxy_enabled", False) and getattr(transcript_settings, "proxy_reputation_enabled", False):
+        try:
+            summary = db.proxy_health_summary()
+            log(
+                "proxy health summary",
+                "good_ready",
+                summary.get("good_ready", 0),
+                "good_resting",
+                summary.get("good_resting", 0),
+                "blocked",
+                summary.get("blocked", 0),
+                "purgatory",
+                summary.get("purgatory", 0),
+                "retired",
+                summary.get("retired", 0),
+                "total",
+                summary.get("total", 0),
+            )
+        except Exception as exc:
+            dlog(settings, "proxy health summary unavailable", exc.__class__.__name__)
     remaining = settings.max_videos_per_poll
     feed_groups = []
     enabled_modes = set(FEED_MODES if settings.feed_mode == "all" else [item.strip() for item in settings.feed_mode.split(",")])

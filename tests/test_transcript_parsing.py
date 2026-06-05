@@ -2,6 +2,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,11 +14,13 @@ from transcript_providers import (  # noqa: E402
     TranscriptSettings,
     _candidate_proxy_tokens,
     _next_usable_proxy,
+    _ordered_proxy_factories,
     _pick_caption_track,
     _proxy_from_raw_list_token,
     _record_proxy_failure,
     _record_proxy_success,
     cookiefile_from_env,
+    fetch_transcript,
     parse_json3_to_segments,
     parse_vtt_to_segments,
     settings_from_env,
@@ -192,6 +195,52 @@ https://proxy.example.com:443, socks5://9.9.9.9:1080 garbage
             _next_usable_proxy("test", next_proxy, settings, proxy_memory=Memory()),
             "http://5.6.7.8:3128",
         )
+
+    def test_proxy_strategy_prefers_good_pool_most_of_the_time(self):
+        settings = TranscriptSettings(proxy_good_first_ratio=0.8, proxy_good_attempts=1)
+        fresh = [("proxylist", lambda: "http://fresh.example:8080", 2)]
+
+        with patch("transcript_providers.random.random", return_value=0.1):
+            plan = _ordered_proxy_factories(lambda: "http://good.example:8080", fresh, settings)
+
+        self.assertEqual([source for source, _next_proxy, _attempts in plan], ["reputation", "proxylist"])
+
+    def test_proxy_strategy_sometimes_tests_fresh_sources_first(self):
+        settings = TranscriptSettings(proxy_good_first_ratio=0.8, proxy_good_attempts=1)
+        fresh = [("proxylist", lambda: "http://fresh.example:8080", 2)]
+
+        with patch("transcript_providers.random.random", return_value=0.95):
+            plan = _ordered_proxy_factories(lambda: "http://good.example:8080", fresh, settings)
+
+        self.assertEqual([source for source, _next_proxy, _attempts in plan], ["proxylist", "reputation"])
+
+    def test_cookie_backed_proxy_ytdlp_retries_are_suppressed(self):
+        logs = []
+        settings = TranscriptSettings(
+            proxy_enabled=True,
+            proxy_sources=["proxylist"],
+            proxy_attempts=1,
+            proxy_ytdlp_enabled=True,
+            proxy_ytdlp_attempts=1,
+            ytdlp_cookies="cookies.txt",
+            proxy_selection_attempts=1,
+        )
+
+        with patch(
+            "transcript_providers.fetch_with_youtube_transcript_api",
+            side_effect=TranscriptError("blocked", "RequestBlocked", transient=True),
+        ), patch(
+            "transcript_providers.fetch_with_ytdlp",
+            side_effect=TranscriptError("blocked", "HTTPError", transient=True),
+        ) as ytdlp, patch(
+            "transcript_providers._raw_proxy_list_factory",
+            return_value=lambda: "http://1.2.3.4:8080",
+        ):
+            with self.assertRaises(TranscriptError):
+                fetch_transcript("video01", settings, log=lambda *parts: logs.append(" ".join(str(part) for part in parts)))
+
+        self.assertEqual(ytdlp.call_count, 1)
+        self.assertIn("skip proxy yt-dlp retries because cookies are configured", logs)
 
     def test_ytdlp_proxy_retries_default_to_disabled(self):
         import os
