@@ -91,6 +91,73 @@ class FeedCoverageTests(unittest.TestCase):
         self.assertEqual(calls, ["newest1", "second2"])
         self.assertEqual(processed, 1)
 
+    def test_first_run_retry_not_due_then_success_sets_baseline(self):
+        db = FakeDb()
+        calls = []
+        entries = [
+            entry("newest1", "2026-06-04T12:00:00Z"),
+            entry("second2", "2026-06-04T11:00:00Z"),
+            entry("oldest3", "2026-06-04T10:00:00Z"),
+        ]
+
+        def fake_handle(*args, **kwargs):
+            video_id = args[-1]
+            calls.append(video_id)
+            return main.VIDEO_NOT_DUE if video_id == "newest1" else main.VIDEO_OK
+
+        with patch.object(main, "fetch_youtube_feed", return_value=(SimpleNamespace(entries=entries), {})), patch.object(
+            main, "fetch_youtube_api_entries", return_value=([], {})
+        ), patch.object(main, "fetch_youtube_video_statuses", return_value={}), patch.object(
+            main, "handle_video", side_effect=fake_handle
+        ):
+            processed = main.process_channel(
+                settings(dry_run=False),
+                db,
+                summarizer=None,
+                config={},
+                transcript_settings=None,
+                poll_context=main.PollContext(llm_limit=5),
+                feed={"youtube_channel_id": "UCtest"},
+                mode="blazers",
+            )
+
+        self.assertEqual(calls, ["newest1", "second2"])
+        self.assertEqual(processed, 1)
+        self.assertEqual(db.baseline.isoformat(), "2026-06-04T11:00:00+00:00")
+
+    def test_first_run_already_seen_sets_baseline_without_backfill(self):
+        db = FakeDb()
+        calls = []
+        entries = [
+            entry("newest1", "2026-06-04T12:00:00Z"),
+            entry("second2", "2026-06-04T11:00:00Z"),
+        ]
+
+        def fake_handle(*args, **kwargs):
+            video_id = args[-1]
+            calls.append(video_id)
+            return main.VIDEO_ALREADY_SEEN
+
+        with patch.object(main, "fetch_youtube_feed", return_value=(SimpleNamespace(entries=entries), {})), patch.object(
+            main, "fetch_youtube_api_entries", return_value=([], {})
+        ), patch.object(main, "fetch_youtube_video_statuses", return_value={}), patch.object(
+            main, "handle_video", side_effect=fake_handle
+        ):
+            processed = main.process_channel(
+                settings(dry_run=False),
+                db,
+                summarizer=None,
+                config={},
+                transcript_settings=None,
+                poll_context=main.PollContext(llm_limit=5),
+                feed={"youtube_channel_id": "UCtest"},
+                mode="blazers",
+            )
+
+        self.assertEqual(calls, ["newest1"])
+        self.assertEqual(processed, 0)
+        self.assertEqual(db.baseline.isoformat(), "2026-06-04T12:00:00+00:00")
+
     def test_completed_stream_entries_merge_with_upload_entries(self):
         upload = entry("upload1", "2026-06-04T10:00:00Z")
         duplicate = entry("upload1", "2026-06-04T10:00:00Z", title="duplicate")

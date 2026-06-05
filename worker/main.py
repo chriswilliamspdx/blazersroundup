@@ -1229,11 +1229,13 @@ def process_channel(
         candidates = []
 
     dlog(settings, "candidates", len(candidates), "baseline", baseline.isoformat() if baseline else None)
+    first_run_feed = baseline is None
     all_posting_ok = True
     completed = 0
     attempted = 0
     transient_failures = 0
     newest_completed_pub = None
+    first_run_anchor_pub = None
     video_statuses = fetch_youtube_video_statuses(settings, [row[2] for row in candidates])
     for published_at, entry, video_id in candidates:
         if poll_context.llm_wait:
@@ -1254,7 +1256,13 @@ def process_channel(
             video_id,
             video_status=video_statuses.get(video_id),
         )
-        if outcome in (VIDEO_SKIP_CANDIDATE, VIDEO_ALREADY_SEEN):
+        if outcome == VIDEO_SKIP_CANDIDATE:
+            continue
+        if outcome == VIDEO_ALREADY_SEEN:
+            if first_run_feed:
+                first_run_anchor_pub = published_at
+                dlog(settings, "first-run baseline anchor already seen", video_id)
+                break
             continue
         if outcome == VIDEO_NOT_DUE:
             dlog(settings, "skip candidate: retry not due", video_id)
@@ -1264,6 +1272,8 @@ def process_channel(
         if outcome == VIDEO_OK:
             completed += 1
             newest_completed_pub = published_at if newest_completed_pub is None else max(newest_completed_pub, published_at)
+            if first_run_feed:
+                first_run_anchor_pub = newest_completed_pub
             dlog(settings, "feed completed candidate", video_id)
             break
         if outcome == VIDEO_RETRY_LATER and not poll_context.llm_wait:
@@ -1276,9 +1286,12 @@ def process_channel(
             all_posting_ok = False
         break
 
-    if candidates and completed == 0 and not poll_context.llm_wait:
+    if candidates and completed == 0 and first_run_anchor_pub is None and not poll_context.llm_wait:
         dlog(settings, "feed exhausted candidates without completed video", feed_url)
-    if not settings.dry_run and all_posting_ok and newest_completed_pub and (baseline is None or newest_completed_pub > baseline):
+    if not settings.dry_run and first_run_feed and first_run_anchor_pub:
+        db.set_feed_baseline(feed_url, first_run_anchor_pub)
+        dlog(settings, "first-run baseline set", feed_url, first_run_anchor_pub.isoformat())
+    elif not settings.dry_run and all_posting_ok and newest_completed_pub and newest_completed_pub > baseline:
         db.set_feed_baseline(feed_url, newest_completed_pub)
     return attempted
 
