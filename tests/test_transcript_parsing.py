@@ -9,9 +9,11 @@ sys.path.insert(0, str(ROOT / "worker"))
 
 from transcript_providers import (  # noqa: E402
     PROXY_HEALTH_CACHE,
+    TranscriptError,
     TranscriptSettings,
     _candidate_proxy_tokens,
     _next_usable_proxy,
+    _pick_caption_track,
     _proxy_from_raw_list_token,
     _record_proxy_failure,
     _record_proxy_success,
@@ -61,6 +63,41 @@ Trail Blazers segment starts
                 (8.0, 2.0, "Scoot Henderson update"),
             ],
         )
+
+    def test_pick_caption_track_accepts_english_auto_caption_variant(self):
+        info = {
+            "subtitles": {},
+            "automatic_captions": {
+                "en-orig": [{"ext": "vtt", "url": "https://example.com/en-orig.vtt"}],
+            },
+        }
+
+        self.assertEqual(_pick_caption_track(info), ("https://example.com/en-orig.vtt", "vtt"))
+
+    def test_pick_caption_track_falls_back_to_auto_caption_for_same_language(self):
+        info = {
+            "subtitles": {
+                "en": [{"ext": "srv1", "url": "https://example.com/en.srv1"}],
+            },
+            "automatic_captions": {
+                "en": [{"ext": "json3", "url": "https://example.com/en.json3"}],
+            },
+        }
+
+        self.assertEqual(_pick_caption_track(info), ("https://example.com/en.json3", "json3"))
+
+    def test_pick_caption_track_reports_available_caption_keys(self):
+        info = {
+            "subtitles": {"fr": [{"ext": "vtt", "url": "https://example.com/fr.vtt"}]},
+            "automatic_captions": {"es": [{"ext": "vtt", "url": "https://example.com/es.vtt"}]},
+        }
+
+        with self.assertRaises(TranscriptError) as ctx:
+            _pick_caption_track(info)
+
+        self.assertEqual(ctx.exception.error_type, "NoCaptionTrack")
+        self.assertIn("subtitles=fr", str(ctx.exception))
+        self.assertIn("automatic_captions=es", str(ctx.exception))
 
     def test_cookiefile_from_env_writes_private_cookie_text(self):
         import os

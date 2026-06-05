@@ -262,20 +262,60 @@ def fetch_with_youtube_transcript_api(
         raise _classify_yta_error(exc) from exc
 
 
+def _is_english_caption_key(language: str) -> bool:
+    normalized = (language or "").lower().replace("_", "-")
+    return normalized == "en" or normalized.startswith(("en-", "en."))
+
+
+def _caption_language_order(*caption_maps: dict) -> list[str]:
+    keys = []
+    for caption_map in caption_maps:
+        keys.extend(caption_map.keys())
+    exact = [language for language in LANGUAGE_PRIORITY if language in keys]
+    variants = sorted(
+        {
+            language
+            for language in keys
+            if language not in exact and _is_english_caption_key(language)
+        }
+    )
+    return exact + variants
+
+
+def _rank_caption_tracks(tracks: list[dict]) -> list[dict]:
+    ranked = [
+        track
+        for track in tracks
+        if track.get("ext") in CAPTION_FORMAT_PRIORITY and track.get("url")
+    ]
+    ranked.sort(key=lambda track: CAPTION_FORMAT_PRIORITY.index(track["ext"]))
+    return ranked
+
+
+def _caption_keys_for_log(caption_map: dict) -> str:
+    keys = sorted(str(key) for key in caption_map.keys())
+    return ",".join(keys[:20]) if keys else "none"
+
+
 def _pick_caption_track(info: dict) -> tuple[str, str]:
     subtitles = info.get("subtitles") or {}
     automatic_captions = info.get("automatic_captions") or {}
-    for language in LANGUAGE_PRIORITY:
-        tracks = subtitles.get(language) or automatic_captions.get(language) or []
-        ranked = [
-            track
-            for track in tracks
-            if track.get("ext") in CAPTION_FORMAT_PRIORITY and track.get("url")
-        ]
-        ranked.sort(key=lambda track: CAPTION_FORMAT_PRIORITY.index(track["ext"]))
-        if ranked:
-            return ranked[0]["url"], ranked[0]["ext"]
-    raise TranscriptError("yt-dlp: no English json3 or vtt caption track found", "NoCaptionTrack", transient=False)
+    language_order = _caption_language_order(subtitles, automatic_captions)
+
+    for caption_map in (subtitles, automatic_captions):
+        for language in language_order:
+            tracks = caption_map.get(language) or []
+            ranked = _rank_caption_tracks(tracks)
+            if ranked:
+                return ranked[0]["url"], ranked[0]["ext"]
+
+    raise TranscriptError(
+        "yt-dlp: no English json3 or vtt caption track found; "
+        f"subtitles={_caption_keys_for_log(subtitles)}; "
+        f"automatic_captions={_caption_keys_for_log(automatic_captions)}",
+        "NoCaptionTrack",
+        transient=False,
+    )
 
 
 def fetch_with_ytdlp(video_id: str, settings: TranscriptSettings, proxy_url: str | None = None) -> TranscriptResult:
@@ -732,6 +772,8 @@ def fetch_transcript(
         except TranscriptError as exc:
             errors.append(exc)
             log("transcript provider failed", video_id, provider_name, exc.error_type)
+            if provider_name == "yt-dlp-caption" and exc.error_type == "NoCaptionTrack":
+                log("caption track diagnostic", video_id, str(exc))
             if not exc.transient and provider_name == "yt-dlp-caption":
                 raise exc
 
