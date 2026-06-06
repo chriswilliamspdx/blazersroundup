@@ -257,6 +257,16 @@ async function createRepost(agent, uri, cid) {
   throw new Error('ATProto createRecord client is unavailable');
 }
 
+async function searchPosts(agent, params) {
+  if (agent.app?.bsky?.feed?.searchPosts) {
+    return agent.app.bsky.feed.searchPosts(params);
+  }
+  if (agent.api?.app?.bsky?.feed?.searchPosts) {
+    return agent.api.app.bsky.feed.searchPosts(params);
+  }
+  throw new Error('Bluesky searchPosts client is unavailable');
+}
+
 app.get('/session/status', async (_req, res) => {
   res.json(await sessionStatus());
 });
@@ -317,6 +327,33 @@ app.post('/post-thread', async (req, res, next) => {
     return res.json({ ok: true });
   } catch (err) {
     console.error('[post-thread] error:', err);
+    return next(err);
+  }
+});
+
+app.post('/search-posts', async (req, res, next) => {
+  try {
+    const token = req.get('X-Internal-Token') || '';
+    if (token !== INTERNAL_API_TOKEN) return res.status(403).json({ error: 'forbidden' });
+
+    const q = String(req.body?.q || '').trim();
+    if (!q) return res.status(400).json({ error: 'missing q' });
+
+    const limit = Math.max(1, Math.min(100, Number.parseInt(req.body?.limit || '50', 10) || 50));
+    const sort = ['top', 'latest'].includes(req.body?.sort) ? req.body.sort : 'top';
+    const params = { q, limit, sort };
+    if (req.body?.since) params.since = String(req.body.since);
+
+    const agent = await restoreBotAgent();
+    const result = await searchPosts(agent, params);
+    return res.json({
+      ok: true,
+      posts: result?.data?.posts || result?.posts || [],
+      cursor: result?.data?.cursor || result?.cursor || null,
+      hitsTotal: result?.data?.hitsTotal ?? result?.hitsTotal ?? null,
+    });
+  } catch (err) {
+    console.error('[search-posts] error:', err);
     return next(err);
   }
 });

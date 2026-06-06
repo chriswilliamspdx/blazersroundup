@@ -104,8 +104,8 @@ class WorkerSettings:
     bluesky_repost_max_queries: int
     bluesky_repost_max_per_poll: int
     bluesky_repost_search_sort: str
-    bluesky_repost_search_base_url: str
     bluesky_repost_search_pause_seconds: float
+    bluesky_repost_max_search_errors: int
     bluesky_repost_skip_replies: bool
     bluesky_repost_bot_handles: list[str]
     bluesky_repost_junk_words: list[str]
@@ -172,8 +172,8 @@ class WorkerSettings:
             bluesky_repost_max_queries=int(os.getenv("BLUESKY_REPOST_MAX_QUERIES", "80")),
             bluesky_repost_max_per_poll=int(os.getenv("BLUESKY_REPOST_MAX_PER_POLL", "5")),
             bluesky_repost_search_sort=os.getenv("BLUESKY_REPOST_SEARCH_SORT", "top"),
-            bluesky_repost_search_base_url=os.getenv("BLUESKY_SEARCH_BASE_URL", "https://public.api.bsky.app").rstrip("/"),
             bluesky_repost_search_pause_seconds=float(os.getenv("BLUESKY_REPOST_SEARCH_PAUSE_SECONDS", "0.25")),
+            bluesky_repost_max_search_errors=int(os.getenv("BLUESKY_REPOST_MAX_SEARCH_ERRORS", "5")),
             bluesky_repost_skip_replies=os.getenv("BLUESKY_REPOST_SKIP_REPLIES", "1") == "1",
             bluesky_repost_bot_handles=split_csv_words(
                 os.getenv("BLUESKY_REPOST_BOT_HANDLES") or os.getenv("BSKY_EXPECTED_HANDLE"),
@@ -1342,24 +1342,31 @@ def bluesky_repost_due(settings: WorkerSettings, db: Database, now=None) -> bool
 
 
 def search_bluesky_posts(settings: WorkerSettings, query: str, since: datetime):
-    response = requests.get(
-        f"{settings.bluesky_repost_search_base_url}/xrpc/app.bsky.feed.searchPosts",
-        params={
-            "q": query,
-            "sort": settings.bluesky_repost_search_sort,
-            "since": since.astimezone(UTC).isoformat().replace("+00:00", "Z"),
-            "limit": max(1, min(100, settings.bluesky_repost_max_results_per_query)),
-        },
-        timeout=20,
-    )
+    payload = {
+        "q": query,
+        "sort": settings.bluesky_repost_search_sort,
+        "since": since.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "limit": max(1, min(100, settings.bluesky_repost_max_results_per_query)),
+    }
+    try:
+        response = requests.post(
+            f"{settings.web_base_url}/search-posts",
+            headers={"Content-Type": "application/json", "X-Internal-Token": settings.internal_api_token},
+            data=json.dumps(payload),
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        log("Bluesky search failed", "request_error", query, exc.__class__.__name__)
+        return [], False
+
     if response.status_code != 200:
         log("Bluesky search failed", response.status_code, query, response.text[:300])
-        return []
+        return [], False
     try:
-        return response.json().get("posts") or []
+        return response.json().get("posts") or [], True
     except Exception as exc:
         log("Bluesky search parse failed", query, exc.__class__.__name__)
-        return []
+        return [], False
 
 
 def scan_bluesky_reposts(settings: WorkerSettings, db: Database, config: dict):
@@ -1379,12 +1386,19 @@ def scan_bluesky_reposts(settings: WorkerSettings, db: Database, config: dict):
     candidates = 0
     ready = 0
     reposted = 0
+    search_errors = 0
     skipped = {}
 
     log("Bluesky repost scan", "queries", len(queries), "since", since.isoformat())
     for query in queries:
-        posts = search_bluesky_posts(settings, query, since)
+        posts, ok = search_bluesky_posts(settings, query, since)
         searched += 1
+        if not ok:
+            search_errors += 1
+            if search_errors >= max(1, settings.bluesky_repost_max_search_errors):
+                log("Bluesky repost scan aborting after search errors", search_errors)
+                break
+            continue
         for post in posts:
             candidate = candidate_row(post, query)
             uri = candidate["uri"]
@@ -1449,6 +1463,8 @@ def scan_bluesky_reposts(settings: WorkerSettings, db: Database, config: dict):
         ready,
         "reposted",
         reposted,
+        "search_errors",
+        search_errors,
         "skipped",
         json.dumps(skipped, sort_keys=True),
     )

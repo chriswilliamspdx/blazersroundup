@@ -2,7 +2,7 @@
 
 Two-service Railway app:
 
-- **web/** (Node): Bluesky OAuth confidential client plus the internal `/post-thread` posting API.
+- **web/** (Node): Bluesky OAuth confidential client plus internal posting, reposting, and authenticated search APIs.
 - **worker/** (Python): polls YouTube channel RSS, fetches captions/transcripts without downloading media, summarizes with Gemini, and asks `web` to post.
 
 ## One-time setup
@@ -146,11 +146,12 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `BLUESKY_REPOST_MAX_QUERIES` = 80 (optional; caps searches built from the podcast keyword list)
 - `BLUESKY_REPOST_MAX_PER_POLL` = 5 (optional; safety cap on reposts per scan)
 - `BLUESKY_REPOST_SEARCH_SORT` = `top` (optional; `latest` is also supported)
+- `BLUESKY_REPOST_SEARCH_PAUSE_SECONDS` = 0.25 (optional; pause between search queries)
+- `BLUESKY_REPOST_MAX_SEARCH_ERRORS` = 5 (optional; aborts a scan after repeated search failures)
 - `BLUESKY_REPOST_SKIP_REPLIES` = 1 (optional; avoids reposting replies without context)
 - `BLUESKY_REPOST_BOT_HANDLES` = `blazersroundup.bsky.social` (optional comma-separated self-handle list)
 - `BLUESKY_REPOST_JUNK_WORDS` = optional comma-separated override for betting/fantasy/junk filtering
 - `BLUESKY_REPOST_SEARCH_QUERIES` = optional comma-separated search queries; leave unset to derive from `keywords_positive`
-- `BLUESKY_SEARCH_BASE_URL` = `https://public.api.bsky.app` (optional)
 
 Use a dedicated YouTube account for cookies, not your primary personal account.
 Free proxy retries are focused on `youtube-transcript-api`; keep `TRANSCRIPT_PROXY_YTDLP_ENABLED=0`. If cookies are configured, the worker will skip proxy-backed `yt-dlp` even if this variable is accidentally enabled, so YouTube account/session cookies do not go through free proxies.
@@ -168,7 +169,7 @@ The worker logs a compact proxy health summary at the start of each poll when pr
 
 Feeds can opt into completed livestream discovery with `scan_streams: true`. This uses the YouTube Data API search endpoint, so enable it only for channels where archived streams matter.
 
-Bluesky repost candidates are stored in `bluesky_repost_candidates`. Posts below the like threshold remain candidates and can be reposted by a later scan after their like count rises.
+Bluesky repost candidates are stored in `bluesky_repost_candidates`. Posts below the like threshold remain candidates and can be reposted by a later scan after their like count rises. Search runs through the web service's restored Bluesky OAuth session so Railway does not depend on unauthenticated public AppView search.
 
 ## Local checks
 
