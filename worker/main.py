@@ -16,6 +16,13 @@ from google.genai import errors as genai_errors
 from google.genai import types as gtypes
 from psycopg2.extras import RealDictCursor
 
+from bluesky_reposts import (
+    DEFAULT_JUNK_WORDS,
+    build_search_queries,
+    candidate_reason,
+    candidate_row,
+    split_csv_words,
+)
 from retry import next_retry_at_for_attempt, transcript_retry_due
 from text_utils import (
     build_model_input,
@@ -34,6 +41,7 @@ YOUTUBE_FEED_USER_AGENT = (
 )
 FEED_MODES = ("national", "blazers", "high_volume")
 HIGH_VOLUME_METADATA_EXCLUDED_KEYWORDS = {"portland"}
+LAST_DRY_RUN_BLUESKY_SCAN_AT = None
 
 
 def log(*args):
@@ -88,6 +96,20 @@ class WorkerSettings:
     youtube_metadata_check_enabled: bool
     youtube_completed_streams_enabled: bool
     youtube_stream_search_min_minutes: int
+    bluesky_repost_enabled: bool
+    bluesky_repost_interval_seconds: int
+    bluesky_repost_lookback_hours: int
+    bluesky_repost_min_likes: int
+    bluesky_repost_max_results_per_query: int
+    bluesky_repost_max_queries: int
+    bluesky_repost_max_per_poll: int
+    bluesky_repost_search_sort: str
+    bluesky_repost_search_base_url: str
+    bluesky_repost_search_pause_seconds: float
+    bluesky_repost_skip_replies: bool
+    bluesky_repost_bot_handles: list[str]
+    bluesky_repost_junk_words: list[str]
+    bluesky_repost_search_queries: list[str]
 
     @classmethod
     def from_env(cls):
@@ -142,6 +164,23 @@ class WorkerSettings:
             youtube_metadata_check_enabled=os.getenv("YOUTUBE_METADATA_CHECK_ENABLED", "1") == "1",
             youtube_completed_streams_enabled=os.getenv("YOUTUBE_COMPLETED_STREAMS_ENABLED", "1") == "1",
             youtube_stream_search_min_minutes=int(os.getenv("YOUTUBE_STREAM_SEARCH_MINUTES", "60")),
+            bluesky_repost_enabled=os.getenv("BLUESKY_REPOST_ENABLED", "0") == "1",
+            bluesky_repost_interval_seconds=int(os.getenv("BLUESKY_REPOST_INTERVAL_SECONDS", "3600")),
+            bluesky_repost_lookback_hours=int(os.getenv("BLUESKY_REPOST_LOOKBACK_HOURS", "24")),
+            bluesky_repost_min_likes=int(os.getenv("BLUESKY_REPOST_MIN_LIKES", "50")),
+            bluesky_repost_max_results_per_query=int(os.getenv("BLUESKY_REPOST_MAX_RESULTS_PER_QUERY", "50")),
+            bluesky_repost_max_queries=int(os.getenv("BLUESKY_REPOST_MAX_QUERIES", "80")),
+            bluesky_repost_max_per_poll=int(os.getenv("BLUESKY_REPOST_MAX_PER_POLL", "5")),
+            bluesky_repost_search_sort=os.getenv("BLUESKY_REPOST_SEARCH_SORT", "top"),
+            bluesky_repost_search_base_url=os.getenv("BLUESKY_SEARCH_BASE_URL", "https://public.api.bsky.app").rstrip("/"),
+            bluesky_repost_search_pause_seconds=float(os.getenv("BLUESKY_REPOST_SEARCH_PAUSE_SECONDS", "0.25")),
+            bluesky_repost_skip_replies=os.getenv("BLUESKY_REPOST_SKIP_REPLIES", "1") == "1",
+            bluesky_repost_bot_handles=split_csv_words(
+                os.getenv("BLUESKY_REPOST_BOT_HANDLES") or os.getenv("BSKY_EXPECTED_HANDLE"),
+                ["blazersroundup.bsky.social"],
+            ),
+            bluesky_repost_junk_words=split_csv_words(os.getenv("BLUESKY_REPOST_JUNK_WORDS"), DEFAULT_JUNK_WORDS),
+            bluesky_repost_search_queries=split_csv_words(os.getenv("BLUESKY_REPOST_SEARCH_QUERIES"), []),
         )
 
 
@@ -246,6 +285,33 @@ class Database:
             """
             create index if not exists idx_proxy_health_status_cooldown
               on proxy_health(status, cooldown_until);
+            """
+        )
+        self.exec(
+            """
+            create table if not exists bluesky_repost_candidates (
+              uri text primary key,
+              cid text not null,
+              author_did text,
+              author_handle text,
+              text text,
+              indexed_at timestamptz,
+              like_count integer not null default 0,
+              repost_count integer not null default 0,
+              quote_count integer not null default 0,
+              matched_query text,
+              status text not null default 'candidate',
+              first_seen_at timestamptz not null default now(),
+              last_seen_at timestamptz not null default now(),
+              reposted_at timestamptz,
+              last_error text
+            );
+            """
+        )
+        self.exec(
+            """
+            create index if not exists idx_bluesky_repost_candidates_status
+              on bluesky_repost_candidates(status, last_seen_at);
             """
         )
 
@@ -544,6 +610,73 @@ class Database:
             "cooldown_until": cooldown_until,
             "retired_at": retired_at,
         }
+
+    def bluesky_repost_already_done(self, uri: str) -> bool:
+        rows = self.exec(
+            "select 1 from bluesky_repost_candidates where uri=%s and reposted_at is not null",
+            [uri],
+        )
+        return bool(rows)
+
+    def upsert_bluesky_repost_candidate(self, candidate: dict):
+        self.exec(
+            """
+            insert into bluesky_repost_candidates(
+              uri, cid, author_did, author_handle, text, indexed_at,
+              like_count, repost_count, quote_count, matched_query, status, last_seen_at
+            )
+            values(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+            on conflict(uri) do update set
+              cid = excluded.cid,
+              author_did = excluded.author_did,
+              author_handle = excluded.author_handle,
+              text = excluded.text,
+              indexed_at = excluded.indexed_at,
+              like_count = excluded.like_count,
+              repost_count = excluded.repost_count,
+              quote_count = excluded.quote_count,
+              matched_query = excluded.matched_query,
+              status = case
+                when bluesky_repost_candidates.reposted_at is not null then bluesky_repost_candidates.status
+                else excluded.status
+              end,
+              last_seen_at = now(),
+              last_error = null
+            """,
+            [
+                candidate["uri"],
+                candidate["cid"],
+                candidate.get("author_did"),
+                candidate.get("author_handle"),
+                candidate.get("text"),
+                candidate.get("indexed_at"),
+                candidate.get("like_count", 0),
+                candidate.get("repost_count", 0),
+                candidate.get("quote_count", 0),
+                candidate.get("matched_query"),
+                candidate.get("status", "candidate"),
+            ],
+        )
+
+    def mark_bluesky_reposted(self, uri: str):
+        self.exec(
+            """
+            update bluesky_repost_candidates
+            set status='reposted', reposted_at=now(), last_error=null, last_seen_at=now()
+            where uri=%s
+            """,
+            [uri],
+        )
+
+    def mark_bluesky_repost_failed(self, uri: str, error: str):
+        self.exec(
+            """
+            update bluesky_repost_candidates
+            set status='repost_failed', last_error=%s, last_seen_at=now()
+            where uri=%s
+            """,
+            [str(error or "")[:500], uri],
+        )
 
 
 class LLMError(Exception):
@@ -1152,6 +1285,175 @@ def create_thread(
     return True
 
 
+def repost_bluesky_post(settings: WorkerSettings, candidate: dict) -> bool:
+    if settings.dry_run:
+        log(
+            "DRY_RUN repost:",
+            candidate.get("like_count", 0),
+            "likes",
+            candidate.get("author_handle") or "unknown",
+            candidate.get("uri"),
+            clamp_text(candidate.get("text") or "", 180),
+        )
+        return True
+
+    payload = {
+        "uri": candidate["uri"],
+        "cid": candidate["cid"],
+        "authorDid": candidate.get("author_did") or "",
+    }
+    response = requests.post(
+        f"{settings.web_base_url}/repost",
+        headers={"Content-Type": "application/json", "X-Internal-Token": settings.internal_api_token},
+        data=json.dumps(payload),
+        timeout=60,
+    )
+    if response.status_code != 200:
+        log("repost failed", response.status_code, response.text)
+        return False
+    log("reposted bluesky post ok", candidate.get("author_handle") or "unknown", candidate["uri"])
+    return True
+
+
+def bluesky_repost_last_scan_key() -> str:
+    return "bluesky_repost_last_scan_at"
+
+
+def bluesky_repost_due(settings: WorkerSettings, db: Database, now=None) -> bool:
+    global LAST_DRY_RUN_BLUESKY_SCAN_AT
+    if not settings.bluesky_repost_enabled:
+        return False
+    if settings.bluesky_repost_interval_seconds <= 0:
+        return True
+    if settings.dry_run:
+        if not LAST_DRY_RUN_BLUESKY_SCAN_AT:
+            return True
+        return LAST_DRY_RUN_BLUESKY_SCAN_AT + timedelta(seconds=settings.bluesky_repost_interval_seconds) <= (
+            now or datetime.now(UTC)
+        )
+    value = db.get_state(bluesky_repost_last_scan_key())
+    if not value:
+        return True
+    try:
+        last_scan = dtparse.isoparse(value).astimezone(UTC)
+    except Exception:
+        return True
+    return last_scan + timedelta(seconds=settings.bluesky_repost_interval_seconds) <= (now or datetime.now(UTC))
+
+
+def search_bluesky_posts(settings: WorkerSettings, query: str, since: datetime):
+    response = requests.get(
+        f"{settings.bluesky_repost_search_base_url}/xrpc/app.bsky.feed.searchPosts",
+        params={
+            "q": query,
+            "sort": settings.bluesky_repost_search_sort,
+            "since": since.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "limit": max(1, min(100, settings.bluesky_repost_max_results_per_query)),
+        },
+        timeout=20,
+    )
+    if response.status_code != 200:
+        log("Bluesky search failed", response.status_code, query, response.text[:300])
+        return []
+    try:
+        return response.json().get("posts") or []
+    except Exception as exc:
+        log("Bluesky search parse failed", query, exc.__class__.__name__)
+        return []
+
+
+def scan_bluesky_reposts(settings: WorkerSettings, db: Database, config: dict):
+    global LAST_DRY_RUN_BLUESKY_SCAN_AT
+    if not bluesky_repost_due(settings, db):
+        return
+
+    keywords = [keyword.lower() for keyword in config.get("keywords_positive", [])]
+    queries = build_search_queries(
+        config,
+        settings.bluesky_repost_max_queries,
+        configured_queries=settings.bluesky_repost_search_queries,
+    )
+    since = datetime.now(UTC) - timedelta(hours=settings.bluesky_repost_lookback_hours)
+    seen_uris: set[str] = set()
+    searched = 0
+    candidates = 0
+    ready = 0
+    reposted = 0
+    skipped = {}
+
+    log("Bluesky repost scan", "queries", len(queries), "since", since.isoformat())
+    for query in queries:
+        posts = search_bluesky_posts(settings, query, since)
+        searched += 1
+        for post in posts:
+            candidate = candidate_row(post, query)
+            uri = candidate["uri"]
+            if not uri or uri in seen_uris:
+                continue
+            seen_uris.add(uri)
+            if db.bluesky_repost_already_done(uri):
+                skipped["already_reposted"] = skipped.get("already_reposted", 0) + 1
+                continue
+
+            ok, reason = candidate_reason(
+                post,
+                keywords=keywords,
+                junk_words=settings.bluesky_repost_junk_words,
+                bot_handles=settings.bluesky_repost_bot_handles,
+                min_likes=settings.bluesky_repost_min_likes,
+                skip_replies=settings.bluesky_repost_skip_replies,
+            )
+            if not ok:
+                skipped[reason] = skipped.get(reason, 0) + 1
+                continue
+
+            candidate["status"] = "ready" if reason == "ready" else "candidate"
+            candidates += 1
+            if not settings.dry_run:
+                db.upsert_bluesky_repost_candidate(candidate)
+            if reason != "ready":
+                dlog(
+                    settings,
+                    "Bluesky candidate below threshold",
+                    candidate.get("like_count", 0),
+                    candidate.get("author_handle"),
+                    uri,
+                )
+                continue
+
+            ready += 1
+            if reposted >= settings.bluesky_repost_max_per_poll:
+                dlog(settings, "Bluesky repost poll cap reached", settings.bluesky_repost_max_per_poll)
+                continue
+            if repost_bluesky_post(settings, candidate):
+                reposted += 1
+                if not settings.dry_run:
+                    db.mark_bluesky_reposted(uri)
+            elif not settings.dry_run:
+                db.mark_bluesky_repost_failed(uri, "web_repost_failed")
+
+        if settings.bluesky_repost_search_pause_seconds > 0:
+            time.sleep(settings.bluesky_repost_search_pause_seconds)
+
+    if settings.dry_run:
+        LAST_DRY_RUN_BLUESKY_SCAN_AT = datetime.now(UTC)
+    else:
+        db.set_state(bluesky_repost_last_scan_key(), datetime.now(UTC).isoformat())
+    log(
+        "Bluesky repost scan complete",
+        "searched",
+        searched,
+        "candidates",
+        candidates,
+        "ready",
+        ready,
+        "reposted",
+        reposted,
+        "skipped",
+        json.dumps(skipped, sort_keys=True),
+    )
+
+
 def maybe_mark_seen(settings: WorkerSettings, db: Database, feed_url, guid, media_id, published_at):
     if settings.dry_run:
         return
@@ -1579,11 +1881,23 @@ def loop():
         log("yt-dlp cookies enabled")
     else:
         log("yt-dlp cookies not configured")
+    if settings.bluesky_repost_enabled:
+        log(
+            "Bluesky repost scan enabled:",
+            "interval",
+            settings.bluesky_repost_interval_seconds,
+            "s",
+            "min_likes",
+            settings.bluesky_repost_min_likes,
+            "lookback_hours",
+            settings.bluesky_repost_lookback_hours,
+        )
     if settings.dry_run:
         log("DRY_RUN enabled: posts and episode state will not be written")
 
     while True:
         poll_once(settings, db, summarizer, config, transcript_settings)
+        scan_bluesky_reposts(settings, db, config)
         if settings.force_one_shot:
             log("FORCE_ONE_SHOT complete")
             return

@@ -38,6 +38,7 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - **Blazers-specific podcasts**: summarize the newest episode.
   1. Post 1: YouTube episode link first, with a YouTube external card embed.
   2. Post 2: neutral episode summary, max 250 chars by default.
+- **Bluesky reposts**: optional lightweight scan of recent Bluesky posts. When enabled, the worker searches for Blazers keyword matches from the last 24 hours and asks `web` to repost non-junk posts that have reached the like threshold.
 
 ### Formatting and constraints
 
@@ -137,6 +138,19 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `YTDLP_SOCKET_TIMEOUT_SECONDS` = 8.0 (optional)
 - `YTDLP_RETRIES` = 1 (optional)
 - `YTDLP_EXTRACTOR_RETRIES` = 1 (optional)
+- `BLUESKY_REPOST_ENABLED` = 0 or 1 (optional; default 0)
+- `BLUESKY_REPOST_INTERVAL_SECONDS` = 3600 (optional; hourly scan)
+- `BLUESKY_REPOST_LOOKBACK_HOURS` = 24 (optional)
+- `BLUESKY_REPOST_MIN_LIKES` = 50 (optional)
+- `BLUESKY_REPOST_MAX_RESULTS_PER_QUERY` = 50 (optional; Bluesky API maximum is 100)
+- `BLUESKY_REPOST_MAX_QUERIES` = 80 (optional; caps searches built from the podcast keyword list)
+- `BLUESKY_REPOST_MAX_PER_POLL` = 5 (optional; safety cap on reposts per scan)
+- `BLUESKY_REPOST_SEARCH_SORT` = `top` (optional; `latest` is also supported)
+- `BLUESKY_REPOST_SKIP_REPLIES` = 1 (optional; avoids reposting replies without context)
+- `BLUESKY_REPOST_BOT_HANDLES` = `blazersroundup.bsky.social` (optional comma-separated self-handle list)
+- `BLUESKY_REPOST_JUNK_WORDS` = optional comma-separated override for betting/fantasy/junk filtering
+- `BLUESKY_REPOST_SEARCH_QUERIES` = optional comma-separated search queries; leave unset to derive from `keywords_positive`
+- `BLUESKY_SEARCH_BASE_URL` = `https://public.api.bsky.app` (optional)
 
 Use a dedicated YouTube account for cookies, not your primary personal account.
 Free proxy retries are focused on `youtube-transcript-api`; keep `TRANSCRIPT_PROXY_YTDLP_ENABLED=0`. If cookies are configured, the worker will skip proxy-backed `yt-dlp` even if this variable is accidentally enabled, so YouTube account/session cookies do not go through free proxies.
@@ -153,6 +167,8 @@ The worker logs a compact proxy health summary at the start of each poll when pr
 `national_feeds` and `blazers_feeds` scan recent archived videos from the lookback window. `high_volume_feeds` scans recent video metadata first and only fetches transcripts when the title/description/metadata has a Blazers keyword hit.
 
 Feeds can opt into completed livestream discovery with `scan_streams: true`. This uses the YouTube Data API search endpoint, so enable it only for channels where archived streams matter.
+
+Bluesky repost candidates are stored in `bluesky_repost_candidates`. Posts below the like threshold remain candidates and can be reposted by a later scan after their like count rises.
 
 ## Local checks
 

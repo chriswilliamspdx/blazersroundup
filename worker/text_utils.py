@@ -122,6 +122,11 @@ def first_keyword_hit(segments: list[tuple[float, float, str]], keywords: list[s
     return None, None
 
 
+def has_keyword(text: str, keywords: list[str]) -> bool:
+    start, _matched_text = first_keyword_hit([(0, 0, text or "")], keywords)
+    return start is not None
+
+
 def transcript_window(
     segments: list[tuple[float, float, str]],
     start_seconds: int,

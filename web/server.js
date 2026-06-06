@@ -220,6 +220,43 @@ async function buildExternalEmbed(agent, embedRequest) {
   };
 }
 
+async function restoreBotAgent() {
+  const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
+  if (!row.rowCount) {
+    const err = new Error('OAuth session not found. Visit /auth/start to connect.');
+    err.statusCode = 401;
+    throw err;
+  }
+
+  const did = row.rows[0].sub;
+  const oauthSession = await client.restore(did);
+  if (!oauthSession) {
+    const err = new Error('OAuth session restore failed. Re-authorization required.');
+    err.statusCode = 401;
+    throw err;
+  }
+
+  return new Agent(oauthSession);
+}
+
+async function createRepost(agent, uri, cid) {
+  const payload = {
+    repo: agent.did,
+    collection: 'app.bsky.feed.repost',
+    record: {
+      subject: { uri, cid },
+      createdAt: new Date().toISOString(),
+    },
+  };
+  if (agent.com?.atproto?.repo?.createRecord) {
+    return agent.com.atproto.repo.createRecord(payload);
+  }
+  if (agent.api?.com?.atproto?.repo?.createRecord) {
+    return agent.api.com.atproto.repo.createRecord(payload);
+  }
+  throw new Error('ATProto createRecord client is unavailable');
+}
+
 app.get('/session/status', async (_req, res) => {
   res.json(await sessionStatus());
 });
@@ -272,18 +309,7 @@ app.post('/post-thread', async (req, res, next) => {
       return res.status(400).json({ error: 'missing firstText or secondText' });
     }
 
-    const row = await pg.query(`SELECT sub FROM oauth_sessions ORDER BY updated_at DESC LIMIT 1`);
-    if (!row.rowCount) {
-      return res.status(401).json({ error: 'OAuth session not found. Visit /auth/start to connect.' });
-    }
-
-    const did = row.rows[0].sub;
-    const oauthSession = await client.restore(did);
-    if (!oauthSession) {
-      return res.status(401).json({ error: 'OAuth session restore failed. Re-authorization required.' });
-    }
-
-    const agent = new Agent(oauthSession);
+    const agent = await restoreBotAgent();
     const embed = firstEmbed ? await buildExternalEmbed(agent, firstEmbed) : null;
     const firstPost = await agent.post(buildPost(firstText, undefined, postCharLimit, embed));
     await agent.post(buildPost(secondText, { root: firstPost, parent: firstPost }, postCharLimit));
@@ -295,10 +321,33 @@ app.post('/post-thread', async (req, res, next) => {
   }
 });
 
+app.post('/repost', async (req, res, next) => {
+  try {
+    const token = req.get('X-Internal-Token') || '';
+    if (token !== INTERNAL_API_TOKEN) return res.status(403).json({ error: 'forbidden' });
+
+    const { uri, cid, authorDid } = req.body;
+    if (!uri || !cid) {
+      return res.status(400).json({ error: 'missing uri or cid' });
+    }
+
+    const agent = await restoreBotAgent();
+    if (authorDid && authorDid === agent.did) {
+      return res.status(400).json({ error: 'will not repost the bot itself' });
+    }
+
+    const result = await createRepost(agent, String(uri), String(cid));
+    return res.json({ ok: true, uri: result?.data?.uri, cid: result?.data?.cid });
+  } catch (err) {
+    console.error('[repost] error:', err);
+    return next(err);
+  }
+});
+
 app.use((err, _req, res, _next) => {
   console.error('--- unhandled error ---');
   console.error(err);
-  res.status(500).json({
+  res.status(err.statusCode || 500).json({
     error: err.name || 'ServerError',
     message: err.message,
   });

@@ -59,6 +59,28 @@ create table if not exists proxy_health (
 create index if not exists idx_proxy_health_status_cooldown
   on proxy_health(status, cooldown_until);
 
+-- Tracks popular Bluesky posts discovered for simple reposting.
+create table if not exists bluesky_repost_candidates (
+  uri text primary key,
+  cid text not null,
+  author_did text,
+  author_handle text,
+  text text,
+  indexed_at timestamptz,
+  like_count integer not null default 0,
+  repost_count integer not null default 0,
+  quote_count integer not null default 0,
+  matched_query text,
+  status text not null default 'candidate',
+  first_seen_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  reposted_at timestamptz,
+  last_error text
+);
+
+create index if not exists idx_bluesky_repost_candidates_status
+  on bluesky_repost_candidates(status, last_seen_at);
+
 -- OAuth session for the bot web service.
 create table if not exists oauth_sessions (
   sub text primary key,
