@@ -3,7 +3,7 @@
 Two-service Railway app:
 
 - **web/** (Node): Bluesky OAuth confidential client plus internal posting, reposting, and authenticated search APIs.
-- **worker/** (Python): polls YouTube channel RSS, fetches captions/transcripts without downloading media, summarizes with Gemini, and asks `web` to post.
+- **worker/** (Python): polls YouTube channel RSS, fetches captions/transcripts without downloading media, summarizes with Gemini, scans optional lightweight discovery lanes, and asks `web` to post.
 
 ## One-time setup
 
@@ -39,6 +39,7 @@ Before enabling live worker posting, visit `/session/status` on the web service 
   1. Post 1: YouTube episode link first, with a YouTube external card embed.
   2. Post 2: neutral episode summary, max 250 chars by default.
 - **Bluesky reposts**: optional lightweight scan of recent Bluesky posts. When enabled, the worker searches for Blazers keyword matches from the last 24 hours and asks `web` to repost non-junk posts that have reached the like threshold.
+- **News links**: optional lightweight scan of trusted RSS feeds plus Google News RSS searches from `config/news.yaml`. When enabled, the worker keeps only fresh Blazers-related links from the last 24 hours, filters blocked sources/topics, dedupes by canonical URL, and asks `web` to post the source article URL.
 
 ### Formatting and constraints
 
@@ -152,6 +153,18 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - `BLUESKY_REPOST_BOT_HANDLES` = `blazersroundup.bsky.social` (optional comma-separated self-handle list)
 - `BLUESKY_REPOST_JUNK_WORDS` = optional comma-separated override for betting/fantasy/junk filtering
 - `BLUESKY_REPOST_SEARCH_QUERIES` = optional comma-separated search queries; leave unset to derive from `keywords_positive`
+- `NEWS_ENABLED` = 0 or 1 (optional; default 0)
+- `NEWS_DRY_RUN` = 1 to log planned news posts without posting; defaults to `DRY_RUN` when unset
+- `NEWS_CONFIG_PATH` = `/app/config/news.yaml` (optional)
+- `NEWS_INTERVAL_SECONDS` = 3600 (optional; hourly scan)
+- `NEWS_LOOKBACK_HOURS` = 24 (optional)
+- `NEWS_MAX_POSTS_PER_POLL` = 3 (optional; safety cap for live posting)
+- `NEWS_MAX_POSTS_PER_DAY` = 8 (optional; daily safety cap)
+- `NEWS_MAX_ENTRIES_PER_FEED` = 25 (optional; caps RSS entries inspected per source)
+- `NEWS_MAX_GOOGLE_RESOLVES_PER_SCAN` = 75 (optional; caps Google News redirect resolving)
+- `NEWS_REQUIRE_STRONG_MATCH_FOR_BROAD` = 1 (optional; broad keyword searches must still look Blazers-specific)
+- `NEWS_RESOLVE_GOOGLE_LINKS` = 1 (optional; tries to post the source article instead of Google News URL)
+- `NEWS_ALLOW_UNRESOLVED_GOOGLE_URLS` = 0 (optional; skips unresolved Google News URLs in live mode)
 
 Use a dedicated YouTube account for cookies, not your primary personal account.
 Free proxy retries are focused on `youtube-transcript-api`; keep `TRANSCRIPT_PROXY_YTDLP_ENABLED=0`. If cookies are configured, the worker will skip proxy-backed `yt-dlp` even if this variable is accidentally enabled, so YouTube account/session cookies do not go through free proxies.
@@ -170,6 +183,8 @@ The worker logs a compact proxy health summary at the start of each poll when pr
 Feeds can opt into completed livestream discovery with `scan_streams: true`. This uses the YouTube Data API search endpoint, so enable it only for channels where archived streams matter.
 
 Bluesky repost candidates are stored in `bluesky_repost_candidates`. Posts below the like threshold remain candidates and can be reposted by a later scan after their like count rises. Search runs through the web service's restored Bluesky OAuth session so Railway does not depend on unauthenticated public AppView search.
+
+News link candidates are stored in `news_seen_links`. Direct RSS feeds, site-scoped Google News RSS searches, and broad keyword Google News RSS searches live in `config/news.yaml`. For live posting, keep `NEWS_MAX_POSTS_PER_POLL` and `NEWS_MAX_POSTS_PER_DAY` conservative until the dry-run logs show the source quality is good.
 
 ## Local checks
 

@@ -81,6 +81,30 @@ create table if not exists bluesky_repost_candidates (
 create index if not exists idx_bluesky_repost_candidates_status
   on bluesky_repost_candidates(status, last_seen_at);
 
+-- Tracks external news links discovered through RSS and Google News RSS.
+create table if not exists news_seen_links (
+  canonical_url text primary key,
+  original_url text,
+  source_name text,
+  source_type text,
+  source_trust text,
+  title text,
+  summary text,
+  published_at timestamptz,
+  matched_keyword text,
+  status text not null default 'candidate',
+  first_seen_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  posted_at timestamptz,
+  last_error text
+);
+
+create index if not exists idx_news_seen_links_status
+  on news_seen_links(status, last_seen_at);
+
+create index if not exists idx_news_seen_links_posted_at
+  on news_seen_links(posted_at);
+
 -- OAuth session for the bot web service.
 create table if not exists oauth_sessions (
   sub text primary key,

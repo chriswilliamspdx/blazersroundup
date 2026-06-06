@@ -331,6 +331,30 @@ app.post('/post-thread', async (req, res, next) => {
   }
 });
 
+app.post('/post-link', async (req, res, next) => {
+  try {
+    const token = req.get('X-Internal-Token') || '';
+    if (token !== INTERNAL_API_TOKEN) return res.status(403).json({ error: 'forbidden' });
+
+    const url = String(req.body?.url || '').trim();
+    if (!url) return res.status(400).json({ error: 'missing url' });
+
+    const text = String(req.body?.text || url).trim();
+    const agent = await restoreBotAgent();
+    const embed = await buildExternalEmbed(agent, {
+      uri: url,
+      title: req.body?.title,
+      description: req.body?.description,
+    });
+    const result = await agent.post(buildPost(text, undefined, postCharLimit, embed));
+
+    return res.json({ ok: true, uri: result?.uri || result?.data?.uri, cid: result?.cid || result?.data?.cid });
+  } catch (err) {
+    console.error('[post-link] error:', err);
+    return next(err);
+  }
+});
+
 app.post('/search-posts', async (req, res, next) => {
   try {
     const token = req.get('X-Internal-Token') || '';

@@ -23,6 +23,7 @@ from bluesky_reposts import (
     candidate_row,
     split_csv_words,
 )
+from news_scanner import NewsSettings, ensure_news_schema, load_news_config, scan_news_links
 from retry import next_retry_at_for_attempt, transcript_retry_due
 from text_utils import (
     build_model_input,
@@ -1875,8 +1876,12 @@ def loop():
     settings = WorkerSettings.from_env()
     config = load_config(settings)
     transcript_settings = settings_from_env()
+    news_settings = NewsSettings.from_env(settings.web_base_url, settings.internal_api_token, settings.dry_run)
+    news_config = load_news_config(news_settings.config_path) if news_settings.enabled else {}
     db = Database(settings.db_url)
     db.ensure_schema()
+    if news_settings.enabled:
+        ensure_news_schema(db)
     if settings.reset_feed_state:
         db.reset_feed_state()
         log("RESET_FEED_STATE enabled: feed baselines and transcript retry state were cleared")
@@ -1908,12 +1913,26 @@ def loop():
             "lookback_hours",
             settings.bluesky_repost_lookback_hours,
         )
+    if news_settings.enabled:
+        log(
+            "News link scan enabled:",
+            "interval",
+            news_settings.interval_seconds,
+            "s",
+            "lookback_hours",
+            news_settings.lookback_hours,
+            "max_posts_per_poll",
+            news_settings.max_posts_per_poll,
+            "max_posts_per_day",
+            news_settings.max_posts_per_day,
+        )
     if settings.dry_run:
         log("DRY_RUN enabled: posts and episode state will not be written")
 
     while True:
         poll_once(settings, db, summarizer, config, transcript_settings)
         scan_bluesky_reposts(settings, db, config)
+        scan_news_links(news_settings, db, news_config, log=log, debug=settings.debug)
         if settings.force_one_shot:
             log("FORCE_ONE_SHOT complete")
             return

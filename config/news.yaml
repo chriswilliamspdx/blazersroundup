@@ -1,0 +1,153 @@
+keywords_positive:
+  - Portland Trail Blazers
+  - Trail Blazers
+  - Blazers
+  - Portland
+  - Deni Avdija
+  - Blake Wesley
+  - Sidy Cissoko
+  - Damian Lillard
+  - Caleb Love
+  - Yang Hansen
+  - Donovan Clingan
+  - Jrue Holiday
+  - Vit Krejci
+  - Robert Williams
+  - Jerami Grant
+  - Matisse Thybulle
+  - Toumani Camara
+  - Kris Murray
+  - Scoot Henderson
+  - Shaedon Sharpe
+  - Rip City
+  - Joe Cronin
+  - Rip City Remix
+  - Tom Dundon
+  - Moda Center
+
+junk_words:
+  - betting
+  - gambling
+  - fantasy
+  - DFS
+  - mock draft
+  - trade idea
+  - nsfw
+  - parlay
+  - odds
+
+blocked_sources:
+  - https://www.blazersedge.com/
+  - https://ripcityproject.com/
+
+rss_feeds:
+  - name: KGW Blazers
+    url: https://www.kgw.com/feeds/syndication/rss/sports/nba/blazers
+    trust: trusted
+  - name: The Ringer
+    url: https://wp.theringer.com/feed/
+    trust: cautious
+  - name: New York Times Pro Basketball
+    url: https://rss.nytimes.com/services/xml/rss/nyt/ProBasketball.xml
+    trust: trusted
+  - name: ESPN NBA
+    url: https://www.espn.com/espn/rss/nba/news
+    trust: trusted
+  - name: CBS Sports NBA
+    url: https://www.cbssports.com/rss/headlines/nba/
+    trust: trusted
+  - name: Hoops Rumors
+    url: https://www.hoopsrumors.com/feed
+    trust: trusted
+
+site_searches:
+  - name: OregonLive Blazers
+    url: https://www.oregonlive.com/blazers/
+    trust: trusted
+  - name: KOIN Sports
+    url: https://www.koin.com/sports/
+    trust: trusted
+  - name: KATU Trail Blazers
+    url: https://katu.com/sports/trail-blazers
+    trust: trusted
+  - name: FOX 12 Oregon Sports
+    url: https://www.kptv.com/sports/
+    trust: trusted
+  - name: 105.1 The Fan Trail Blazers
+    url: https://www.audacy.com/1051thefan/sports/portland-trailblazers
+    trust: trusted
+  - name: 750 The Game Trail Blazers
+    url: https://www.750thegame.com/category/trail-blazers/
+    trust: trusted
+  - name: Rip City Radio Trail Blazers
+    url: https://ripcityradio.iheart.com/featured/portland-trail-blazers/tab/posts/
+    trust: trusted
+  - name: The Athletic Blazers
+    url: https://www.nytimes.com/athletic/nba/team/blazers/
+    trust: trusted
+  - name: Bleacher Report Blazers
+    url: https://bleacherreport.com/portland-trail-blazers
+    trust: trusted
+  - name: NBC Sports NBA
+    url: https://www.nbcsports.com/nba
+    trust: trusted
+  - name: Sports Illustrated Trail Blazers
+    url: https://www.si.com/nba/trailblazers
+    trust: trusted
+  - name: Yahoo Sports Blazers
+    url: https://sports.yahoo.com/nba/teams/portland/
+    trust: trusted
+  - name: HoopsHype Blazers Rumors
+    url: https://www.hoopshype.com/rumors/?topic=ebbd75c8-2661-4cdf-9293-f30f46f12e95
+    trust: cautious
+  - name: HoopsHype News Analysis
+    url: https://www.hoopshype.com/news-analysis/
+    trust: cautious
+  - name: FOX Sports Blazers
+    url: https://www.foxsports.com/nba/portland-trail-blazers-team
+    trust: trusted
+  - name: AP News Blazers
+    url: https://apnews.com/hub/portland-trail-blazers
+    trust: trusted
+  - name: SportSpyder Blazers
+    url: https://sportspyder.com/nba/portland-trail-blazers/news
+    trust: aggregator
+  - name: Defector NBA
+    url: https://defector.com/category/nba
+    trust: trusted
+  - name: NBA.com Blazers News
+    url: https://www.nba.com/blazers/news
+    trust: trusted
+  - name: Spotrac Blazers
+    url: https://www.spotrac.com/news/_/tag/portland-trail-blazers
+    trust: cautious
+  - name: TMZ Sports
+    url: https://www.tmz.com/sports/
+    trust: cautious
+
+keyword_searches:
+  - query: "Portland trail blazers"
+  - query: "trail blazers"
+  - query: "blazers"
+  - query: "Portland"
+  - query: "deni avdija"
+  - query: "blake Wesley"
+  - query: "sidy cissoko"
+  - query: "damian Lillard"
+  - query: "caleb love"
+  - query: "yang Hansen"
+  - query: "donovan clingan"
+  - query: "jrue holiday"
+  - query: "vit Krejci"
+  - query: "robert Williams"
+  - query: "jerami grant"
+  - query: "matisse Thybulle"
+  - query: "toumani camara"
+  - query: "kris murray"
+  - query: "scoot Henderson"
+  - query: "shaedon sharpe"
+  - query: "rip city"
+  - query: "joe cronin"
+  - query: "rip city remix"
+  - query: "tom dundon"
+  - query: "moda center"
