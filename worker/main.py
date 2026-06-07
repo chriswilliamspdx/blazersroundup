@@ -1477,7 +1477,31 @@ def maybe_mark_seen(settings: WorkerSettings, db: Database, feed_url, guid, medi
     db.mark_seen(feed_url, guid, media_id, published_at)
 
 
+def clean_summary_text(text: str, limit: int) -> str:
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    text = re.sub(r"\s*\.\.\.$", "", text).strip()
+    if len(text) <= limit:
+        return text
+
+    cut = text[:limit].rstrip()
+    minimum_useful_length = min(80, max(0, limit // 2))
+    for marker in (". ", "! ", "? "):
+        sentence_end = cut.rfind(marker)
+        if sentence_end >= minimum_useful_length:
+            return cut[: sentence_end + 1].strip()
+
+    sentence_end = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
+    if sentence_end >= minimum_useful_length:
+        return cut[: sentence_end + 1].strip()
+
+    word_end = cut.rfind(" ")
+    if word_end >= minimum_useful_length:
+        return cut[:word_end].rstrip(" ,;:-")
+    return cut.rstrip(" ,;:-")
+
+
 def build_summary_prompt(exclude_note: str, summary_limit: int = 250) -> str:
+    target_limit = max(80, min(220, summary_limit - 30))
     return (
         "You will be given podcast metadata and a snippet from a transcript. "
         "Decide if it is about the NBA team the Portland Trail Blazers, including players, coaches, "
@@ -1489,7 +1513,7 @@ def build_summary_prompt(exclude_note: str, summary_limit: int = 250) -> str:
         "supports that conclusion. "
         f"{exclude_note}\n\n"
         "Return JSON with fields: is_blazers (boolean), topic (short string), "
-        f"summary (<={summary_limit} chars, neutral tone)."
+        f"summary (one complete sentence, <={target_limit} characters, neutral tone, no ellipsis)."
     )
 
 
@@ -1642,12 +1666,12 @@ def handle_video(
         first_text = f"{link}\nBlazers conversation starts at {timestamp}. Video link timestamped."
     else:
         first_text = youtube_link(video_id)
-    second_text = (output.get("summary") or "").strip()
+    second_text = clean_summary_text(output.get("summary") or "", settings.summary_post_char_limit)
 
     posted = create_thread(
         settings,
         clamp_text(first_text, post_char_limit),
-        clamp_text(second_text, settings.summary_post_char_limit),
+        second_text,
         first_embed_url=link,
         first_embed_title=heading,
         first_embed_description=show_name or "YouTube video",
