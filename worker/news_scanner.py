@@ -22,12 +22,14 @@ NEWS_USER_AGENT = (
 GOOGLE_NEWS_HOSTS = {"news.google.com", "www.news.google.com"}
 GOOGLE_RELATED_HOST_SUFFIXES = (
     "google.com",
+    "googleapis.com",
     "googleusercontent.com",
     "gstatic.com",
     "ggpht.com",
 )
 NON_ARTICLE_HOSTS = {
     "google-analytics.com",
+    "googleapis.com",
     "googletagmanager.com",
     "doubleclick.net",
 }
@@ -55,6 +57,15 @@ TRACKING_QUERY_PARAMS = {
     "smid",
 }
 GENERIC_BROAD_TERMS = {"portland", "blazers"}
+SOURCE_CONTEXT_KEYWORDS = (
+    "blazers",
+    "portland trail blazers",
+    "rip city",
+    "rip-city",
+    "ripcity",
+    "trail-blazers",
+    "trailblazers",
+)
 DEFAULT_NEWS_CONFIG_PATHS = ("/app/config/news.yaml", "config/news.yaml")
 
 
@@ -312,6 +323,21 @@ def junk_words(config: dict) -> list[str]:
     return [str(item).strip() for item in config.get("junk_words", []) if str(item).strip()]
 
 
+def player_name_keywords(config: dict) -> set[str]:
+    return {
+        normalize_spaces(item).lower()
+        for item in config.get("player_name_keywords", [])
+        if normalize_spaces(item)
+    }
+
+
+def source_has_blazers_context(spec: dict, source_name: str) -> bool:
+    source_text = normalize_spaces(
+        f"{spec.get('name', '')} {spec.get('source_url', '')} {source_name}"
+    ).lower()
+    return any(keyword in source_text for keyword in SOURCE_CONTEXT_KEYWORDS)
+
+
 def first_matching_keyword(text: str, keywords: list[str]) -> str | None:
     for keyword in keywords:
         start, _matched_text = first_keyword_hit([(0, 0, text)], [keyword])
@@ -320,10 +346,14 @@ def first_matching_keyword(text: str, keywords: list[str]) -> str | None:
     return None
 
 
+def has_team_context(text: str) -> bool:
+    return has_keyword(text, ["portland trail blazers", "trail blazers", "rip city"])
+
+
 def strong_broad_match(text: str, matched_keyword: str | None) -> bool:
     if matched_keyword and normalize_spaces(matched_keyword).lower() not in GENERIC_BROAD_TERMS:
         return True
-    return has_keyword(text, ["portland trail blazers", "trail blazers", "rip city"])
+    return has_team_context(text)
 
 
 def resolve_original_url(url: str, settings: NewsSettings, resolve_budget: dict) -> tuple[str, bool]:
@@ -344,7 +374,13 @@ def resolve_original_url(url: str, settings: NewsSettings, resolve_budget: dict)
             timeout=settings.request_timeout_seconds,
         )
         final_url = canonicalize_url(response.url)
-        if final_url and not is_google_news_url(final_url):
+        final_domain = normalized_domain(final_url)
+        if (
+            final_url
+            and not is_google_news_url(final_url)
+            and not is_google_related_domain(final_domain)
+            and not is_non_article_url(final_url)
+        ):
             return final_url, False
         body = html.unescape(response.text or "")[:200000]
         for match in re.findall(r"https?://[^\"'<>\\\s]+", body):
@@ -412,6 +448,12 @@ def build_candidate(entry, spec: dict, config: dict, settings: NewsSettings, cut
         and not strong_broad_match(haystack, matched_keyword)
     ):
         return None, "weak_broad_match"
+    if (
+        normalize_spaces(matched_keyword).lower() in player_name_keywords(config)
+        and not has_team_context(haystack)
+        and not source_has_blazers_context(spec, source_name)
+    ):
+        return None, "weak_player_match"
 
     return {
         "canonical_url": canonical_url,

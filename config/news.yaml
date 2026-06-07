@@ -25,6 +25,24 @@ keywords_positive:
   - Tom Dundon
   - Moda Center
 
+player_name_keywords:
+  - Deni Avdija
+  - Blake Wesley
+  - Sidy Cissoko
+  - Damian Lillard
+  - Caleb Love
+  - Yang Hansen
+  - Donovan Clingan
+  - Jrue Holiday
+  - Vit Krejci
+  - Robert Williams
+  - Jerami Grant
+  - Matisse Thybulle
+  - Toumani Camara
+  - Kris Murray
+  - Scoot Henderson
+  - Shaedon Sharpe
+
 junk_words:
   - betting
   - gambling
@@ -35,6 +53,14 @@ junk_words:
   - nsfw
   - parlay
   - odds
+  - baby mama
+  - buy tickets
+  - ex-wife
+  - lynx
+  - mariners
+  - subpoena
+  - storm
+  - time tv stream
 
 blocked_sources:
   - https://www.blazersedge.com/

@@ -43,6 +43,7 @@ class NewsScannerTests(unittest.TestCase):
 
     def test_non_article_urls_are_rejected(self):
         self.assertTrue(is_non_article_url("https://www.google-analytics.com/analytics.js"))
+        self.assertTrue(is_non_article_url("https://fonts.googleapis.com/css?family=Google+Sans"))
         self.assertTrue(is_non_article_url("https://example.com/static/app.js"))
         self.assertFalse(is_non_article_url("https://www.kgw.com/article/sports/nba/blazers/story-id"))
 
@@ -120,6 +121,85 @@ class NewsScannerTests(unittest.TestCase):
         candidate, reason = build_candidate(entry, spec, config, settings, datetime(2026, 6, 5, tzinfo=timezone.utc), {})
         self.assertIsNone(candidate)
         self.assertEqual(reason, "blocked_source_name")
+
+    def test_player_name_only_match_needs_blazers_context(self):
+        settings = NewsSettings(
+            enabled=True,
+            dry_run=True,
+            config_path="",
+            interval_seconds=3600,
+            lookback_hours=24,
+            max_posts_per_poll=3,
+            max_posts_per_day=8,
+            max_entries_per_feed=25,
+            max_google_resolves_per_scan=0,
+            request_timeout_seconds=10,
+            scan_pause_seconds=0,
+            require_strong_match_for_broad=True,
+            resolve_google_links=False,
+            allow_unresolved_google_urls=False,
+            web_base_url="https://example.test",
+            internal_api_token="token",
+        )
+        entry = {
+            "title": "Why Celtics Should Bring Back Robert Williams",
+            "summary": "A Boston roster note.",
+            "published": "2026-06-06T12:00:00Z",
+            "link": "https://www.clnsmedia.com/why-celtics-should-bring-back-robert-williams",
+            "source": {"title": "CLNS Media"},
+        }
+        spec = {"name": "Robert Williams", "source_type": "keyword_search", "trust": "broad"}
+        config = {
+            "keywords_positive": ["Robert Williams"],
+            "player_name_keywords": ["Robert Williams"],
+            "junk_words": [],
+            "blocked_sources": [],
+        }
+        candidate, reason = build_candidate(entry, spec, config, settings, datetime(2026, 6, 5, tzinfo=timezone.utc), {})
+        self.assertIsNone(candidate)
+        self.assertEqual(reason, "weak_player_match")
+
+    def test_player_name_match_allowed_from_blazers_specific_source(self):
+        settings = NewsSettings(
+            enabled=True,
+            dry_run=True,
+            config_path="",
+            interval_seconds=3600,
+            lookback_hours=24,
+            max_posts_per_poll=3,
+            max_posts_per_day=8,
+            max_entries_per_feed=25,
+            max_google_resolves_per_scan=0,
+            request_timeout_seconds=10,
+            scan_pause_seconds=0,
+            require_strong_match_for_broad=True,
+            resolve_google_links=False,
+            allow_unresolved_google_urls=False,
+            web_base_url="https://example.test",
+            internal_api_token="token",
+        )
+        entry = {
+            "title": "Robert Williams says he feels healthy",
+            "summary": "A roster note.",
+            "published": "2026-06-06T12:00:00Z",
+            "link": "https://sports.yahoo.com/nba/teams/portland/robert-williams-story",
+            "source": {"title": "Yahoo Sports"},
+        }
+        spec = {
+            "name": "Yahoo Sports Blazers",
+            "source_type": "site_search",
+            "source_url": "https://sports.yahoo.com/nba/teams/portland/",
+            "trust": "trusted",
+        }
+        config = {
+            "keywords_positive": ["Robert Williams"],
+            "player_name_keywords": ["Robert Williams"],
+            "junk_words": [],
+            "blocked_sources": [],
+        }
+        candidate, reason = build_candidate(entry, spec, config, settings, datetime(2026, 6, 5, tzinfo=timezone.utc), {})
+        self.assertIsNotNone(candidate)
+        self.assertEqual(reason, "candidate")
 
 
 if __name__ == "__main__":
