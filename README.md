@@ -184,7 +184,7 @@ Feeds can opt into completed livestream discovery with `scan_streams: true`. Thi
 
 Bluesky repost candidates are stored in `bluesky_repost_candidates`. Posts below the like threshold remain candidates and can be reposted by a later scan after their like count rises. Search runs through the web service's restored Bluesky OAuth session so Railway does not depend on unauthenticated public AppView search.
 
-News link candidates are stored in `news_seen_links`. Direct RSS feeds, site-scoped Google News RSS searches, and broad keyword Google News RSS searches live in `config/news.yaml`. For live posting, keep `NEWS_MAX_POSTS_PER_POLL` and `NEWS_MAX_POSTS_PER_DAY` conservative until the dry-run logs show the source quality is good.
+News link candidates are stored in `news_seen_links`. Direct RSS feeds, site-scoped Google News RSS searches, and broad keyword Google News RSS searches live in `config/news.yaml`. Use `blocked_sources` for domains and `blocked_source_names` for Google News source labels that should never be posted. For live posting, keep `NEWS_MAX_POSTS_PER_POLL` and `NEWS_MAX_POSTS_PER_DAY` conservative until the dry-run logs show the source quality is good.
 
 ## Local checks
 

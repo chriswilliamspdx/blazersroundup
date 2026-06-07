@@ -26,6 +26,24 @@ GOOGLE_RELATED_HOST_SUFFIXES = (
     "gstatic.com",
     "ggpht.com",
 )
+NON_ARTICLE_HOSTS = {
+    "google-analytics.com",
+    "googletagmanager.com",
+    "doubleclick.net",
+}
+NON_ARTICLE_PATH_EXTENSIONS = (
+    ".css",
+    ".gif",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".js",
+    ".json",
+    ".png",
+    ".svg",
+    ".webp",
+    ".xml",
+)
 TRACKING_QUERY_PARAMS = {
     "fbclid",
     "gclid",
@@ -174,6 +192,17 @@ def is_google_related_domain(domain: str) -> bool:
     return any(domain == suffix or domain.endswith(f".{suffix}") for suffix in GOOGLE_RELATED_HOST_SUFFIXES)
 
 
+def is_non_article_url(url: str) -> bool:
+    parsed = urlparse(str(url or ""))
+    domain = normalized_domain(url)
+    if not domain:
+        return True
+    if domain in NON_ARTICLE_HOSTS or any(domain == item or domain.endswith(f".{item}") for item in NON_ARTICLE_HOSTS):
+        return True
+    path = (parsed.path or "").lower()
+    return any(path.endswith(extension) for extension in NON_ARTICLE_PATH_EXTENSIONS)
+
+
 def google_news_rss_url(query: str) -> str:
     query = normalize_spaces(query)
     if "when:" not in query.lower():
@@ -266,6 +295,15 @@ def blocked_domains(config: dict) -> set[str]:
     return {normalized_domain(url) for url in config.get("blocked_sources", []) if normalized_domain(url)}
 
 
+def blocked_source_names(config: dict) -> set[str]:
+    return {normalize_spaces(name).lower() for name in config.get("blocked_source_names", []) if normalize_spaces(name)}
+
+
+def source_name_is_blocked(source_name: str, config: dict) -> bool:
+    normalized = normalize_spaces(source_name).lower()
+    return bool(normalized and normalized in blocked_source_names(config))
+
+
 def all_keywords(config: dict) -> list[str]:
     return [str(item).strip() for item in config.get("keywords_positive", []) if str(item).strip()]
 
@@ -289,13 +327,13 @@ def strong_broad_match(text: str, matched_keyword: str | None) -> bool:
 
 
 def resolve_original_url(url: str, settings: NewsSettings, resolve_budget: dict) -> tuple[str, bool]:
-    import requests
-
     canonical = canonicalize_url(url)
     if not canonical or not is_google_news_url(canonical):
         return canonical, False
     if not settings.resolve_google_links or resolve_budget.get("used", 0) >= settings.max_google_resolves_per_scan:
         return canonical, True
+
+    import requests
 
     resolve_budget["used"] = resolve_budget.get("used", 0) + 1
     try:
@@ -312,7 +350,7 @@ def resolve_original_url(url: str, settings: NewsSettings, resolve_budget: dict)
         for match in re.findall(r"https?://[^\"'<>\\\s]+", body):
             candidate = canonicalize_url(match)
             domain = normalized_domain(candidate)
-            if candidate and domain and not is_google_related_domain(domain):
+            if candidate and domain and not is_google_related_domain(domain) and not is_non_article_url(candidate):
                 return candidate, False
     except Exception:
         pass
@@ -345,6 +383,8 @@ def build_candidate(entry, spec: dict, config: dict, settings: NewsSettings, cut
     canonical_url, unresolved_google_url = resolve_original_url(original_url, settings, resolve_budget)
     if not canonical_url:
         return None, "missing_url"
+    if is_non_article_url(canonical_url):
+        return None, "non_article_url"
 
     domain = normalized_domain(canonical_url)
     if domain in blocked_domains(config):
@@ -353,7 +393,10 @@ def build_candidate(entry, spec: dict, config: dict, settings: NewsSettings, cut
     title = entry_title(entry)
     summary = entry_summary(entry)
     source_name = entry_source_name(entry, spec["name"])
-    haystack = normalize_spaces(f"{title} {summary} {source_name} {canonical_url}")
+    if source_name_is_blocked(source_name, config):
+        return None, "blocked_source_name"
+
+    haystack = normalize_spaces(f"{title} {summary}")
 
     if junk_words(config) and has_keyword(haystack, junk_words(config)):
         return None, "junk"
@@ -365,7 +408,7 @@ def build_candidate(entry, spec: dict, config: dict, settings: NewsSettings, cut
 
     if (
         settings.require_strong_match_for_broad
-        and spec["source_type"] == "keyword_search"
+        and normalize_spaces(matched_keyword).lower() in GENERIC_BROAD_TERMS
         and not strong_broad_match(haystack, matched_keyword)
     ):
         return None, "weak_broad_match"

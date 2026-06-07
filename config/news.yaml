@@ -39,6 +39,23 @@ junk_words:
 blocked_sources:
   - https://www.blazersedge.com/
   - https://ripcityproject.com/
+  - https://www.ripcityproject.com/
+  - https://mshale.com/
+  - https://www.mshale.com/
+  - https://roundtable.io/
+  - https://www.roundtable.io/
+  - https://www.aol.com/
+  - https://www.msn.com/
+  - https://bvmsports.com/
+  - https://www.bvmsports.com/
+
+blocked_source_names:
+  - AOL.com
+  - BVM Sports
+  - Mshale
+  - MSN
+  - Rip City Project
+  - roundtable.io
 
 rss_feeds:
   - name: KGW Blazers
