@@ -37,7 +37,15 @@ def post(text, likes=50, handle="fan.bsky.social", uri="at://did:plc:fan/app.bsk
 
 class BlueskyRepostTests(unittest.TestCase):
     def setUp(self):
-        self.keywords = ["portland trail blazers", "shaedon sharpe", "shaydon sharp", "blazers", "rip city"]
+        self.keywords = [
+            "portland trail blazers",
+            "shaedon sharpe",
+            "shaydon sharp",
+            "robert williams",
+            "time lord",
+            "blazers",
+            "rip city",
+        ]
 
     def test_ready_when_recent_post_has_keyword_and_threshold(self):
         ok, reason = candidate_reason(
@@ -90,6 +98,58 @@ class BlueskyRepostTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(reason, "self_post")
+
+    def test_time_lord_without_basketball_context_is_blocked(self):
+        ok, reason = candidate_reason(
+            post("The Time Lord reveal in Doctor Who was tremendous.", likes=120),
+            keywords=self.keywords,
+            junk_words=DEFAULT_JUNK_WORDS,
+            bot_handles=["blazersroundup.bsky.social"],
+            min_likes=50,
+            skip_replies=True,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "false_positive_context")
+
+    def test_time_lord_with_robert_williams_context_is_ready(self):
+        ok, reason = candidate_reason(
+            post("Time Lord Robert Williams looks healthy for the Blazers.", likes=120),
+            keywords=self.keywords,
+            junk_words=DEFAULT_JUNK_WORDS,
+            bot_handles=["blazersroundup.bsky.social"],
+            min_likes=50,
+            skip_replies=True,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ready")
+
+    def test_men_in_blazers_phrase_is_blocked(self):
+        ok, reason = candidate_reason(
+            post("New Men in Blazers episode is up after the Premier League weekend.", likes=120),
+            keywords=self.keywords,
+            junk_words=DEFAULT_JUNK_WORDS,
+            bot_handles=["blazersroundup.bsky.social"],
+            min_likes=50,
+            skip_replies=True,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "false_positive_context")
+
+    def test_men_in_blazers_handle_is_blocked(self):
+        ok, reason = candidate_reason(
+            post("Blazers are back with a new soccer roundup.", likes=120, handle="meninblazers.bsky.social"),
+            keywords=self.keywords,
+            junk_words=DEFAULT_JUNK_WORDS,
+            bot_handles=["blazersroundup.bsky.social"],
+            min_likes=50,
+            skip_replies=True,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "false_positive_context")
 
     def test_search_queries_use_keywords_but_skip_generic_portland(self):
         queries = build_search_queries(

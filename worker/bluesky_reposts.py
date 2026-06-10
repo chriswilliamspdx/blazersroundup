@@ -25,6 +25,71 @@ DEFAULT_JUNK_WORDS = [
 
 GENERIC_SEARCH_EXCLUDES = {"portland"}
 
+FALSE_POSITIVE_CONTEXT_PHRASES = [
+    "men in blazers",
+    "meninblazers",
+    "doctor who",
+    "dr who",
+    "time lord victorious",
+    "gallifrey",
+    "tardis",
+    "dalek",
+    "sonic screwdriver",
+]
+
+AMBIGUOUS_REPOST_KEYWORDS = {
+    "blazers",
+    "portland",
+    "time lord",
+}
+
+STRONG_BLAZERS_CONTEXT_PHRASES = [
+    "portland trail blazers",
+    "trail blazers",
+    "rip city",
+    "moda center",
+]
+
+TIME_LORD_CONTEXT_PHRASES = [
+    "robert williams",
+    "rob williams",
+    "williams iii",
+    "trail blazers",
+    "portland trail blazers",
+    "blazers",
+    "nba",
+    "basketball",
+]
+
+BASKETBALL_CONTEXT_PHRASES = [
+    "nba",
+    "basketball",
+    "game",
+    "roster",
+    "trade",
+    "draft",
+    "pick",
+    "lottery",
+    "coach",
+    "guard",
+    "center",
+    "forward",
+    "wing",
+    "playoff",
+    "playoffs",
+    "finals",
+    "summer league",
+    "free agency",
+    "contract",
+    "extension",
+    "rookie",
+    "season",
+    "offseason",
+    "team",
+    "arena",
+    "moda center",
+]
+
 
 def split_csv_words(value: str | None, default: list[str] | None = None) -> list[str]:
     if value is None or not str(value).strip():
@@ -34,6 +99,20 @@ def split_csv_words(value: str | None, default: list[str] | None = None) -> list
 
 def normalize_handle(value: str | None) -> str:
     return str(value or "").strip().lower().removeprefix("@")
+
+
+def normalize_match_text(value: str | None) -> str:
+    return normalize_spaces(re.sub(r"[^a-zA-Z0-9]+", " ", str(value or "").lower()))
+
+
+def phrase_in_text(phrase: str, text: str) -> bool:
+    normalized_phrase = normalize_match_text(phrase)
+    normalized_text = normalize_match_text(text)
+    return bool(normalized_phrase and normalized_phrase in normalized_text)
+
+
+def any_phrase_in_text(phrases: list[str], text: str) -> bool:
+    return any(phrase_in_text(phrase, text) for phrase in phrases)
 
 
 def post_uri(post: dict) -> str:
@@ -50,6 +129,10 @@ def post_author_did(post: dict) -> str:
 
 def post_author_handle(post: dict) -> str:
     return normalize_handle((post.get("author") or {}).get("handle"))
+
+
+def post_author_display_name(post: dict) -> str:
+    return str((post.get("author") or {}).get("displayName") or "").strip()
 
 
 def post_text(post: dict) -> str:
@@ -93,6 +176,39 @@ def is_reply(post: dict) -> bool:
 
 def contains_junk(text: str, junk_words: list[str]) -> bool:
     return has_keyword(text, junk_words)
+
+
+def contains_false_positive_context(post: dict) -> bool:
+    text = " ".join([post_text(post), post_author_handle(post), post_author_display_name(post)])
+    return any_phrase_in_text(FALSE_POSITIVE_CONTEXT_PHRASES, text)
+
+
+def non_ambiguous_keywords(keywords: list[str]) -> list[str]:
+    return [
+        normalize_spaces(str(keyword).lower())
+        for keyword in keywords
+        if normalize_spaces(str(keyword).lower())
+        and normalize_spaces(str(keyword).lower()) not in AMBIGUOUS_REPOST_KEYWORDS
+    ]
+
+
+def has_repost_blazers_context(text: str, keywords: list[str]) -> bool:
+    if any_phrase_in_text(STRONG_BLAZERS_CONTEXT_PHRASES, text):
+        return True
+
+    if any_phrase_in_text(non_ambiguous_keywords(keywords), text):
+        return True
+
+    if phrase_in_text("time lord", text):
+        return any_phrase_in_text(TIME_LORD_CONTEXT_PHRASES, text)
+
+    if phrase_in_text("blazers", text):
+        return any_phrase_in_text(BASKETBALL_CONTEXT_PHRASES, text)
+
+    if phrase_in_text("portland", text):
+        return any_phrase_in_text(["nba", "basketball", "trail blazers", "rip city", "moda center"], text)
+
+    return False
 
 
 def build_search_queries(config: dict, max_queries: int, configured_queries: list[str] | None = None) -> list[str]:
@@ -143,8 +259,12 @@ def candidate_reason(
     text = post_text(post)
     if contains_junk(text, junk_words):
         return False, "junk"
+    if contains_false_positive_context(post):
+        return False, "false_positive_context"
     if not has_keyword(text, keywords):
         return False, "no_keyword"
+    if not has_repost_blazers_context(text, keywords):
+        return False, "not_blazers_context"
     if post_like_count(post) < min_likes:
         return True, "below_threshold"
     return True, "ready"
