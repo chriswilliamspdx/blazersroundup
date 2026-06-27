@@ -782,22 +782,14 @@ class GeminiSummarizer:
         self.quota_cooldown_minutes = quota_cooldown_minutes
         self.client = genai.Client(api_key=api_key)
 
-    def summarize_json(self, prompt: str, text: str):
+    def generate_json(self, prompt: str, text: str, response_schema: dict):
         try:
             response = self.client.models.generate_content(
                 model=self.model,
                 contents=[{"role": "user", "parts": [{"text": prompt + "\n\n" + text}]}],
                 config=gtypes.GenerateContentConfig(
                     response_mime_type="application/json",
-                    response_schema={
-                        "type": "object",
-                        "properties": {
-                            "is_blazers": {"type": "boolean"},
-                            "topic": {"type": "string"},
-                            "summary": {"type": "string"},
-                        },
-                        "required": ["is_blazers"],
-                    },
+                    response_schema=response_schema,
                     thinking_config=_thinking_config_for_model(self.model, self.thinking_level),
                 ),
             )
@@ -812,6 +804,36 @@ class GeminiSummarizer:
             return json.loads(response.text or "{}")
         except Exception:
             raise LLMError("LLMInvalidJson", response.text or "")
+
+    def summarize_json(self, prompt: str, text: str):
+        return self.generate_json(
+            prompt,
+            text,
+            {
+                "type": "object",
+                "properties": {
+                    "is_blazers": {"type": "boolean"},
+                    "topic": {"type": "string"},
+                    "summary": {"type": "string"},
+                },
+                "required": ["is_blazers"],
+            },
+        )
+
+    def fact_check_summary_json(self, prompt: str, text: str):
+        return self.generate_json(
+            prompt,
+            text,
+            {
+                "type": "object",
+                "properties": {
+                    "fact_check_passed": {"type": "boolean"},
+                    "summary": {"type": "string"},
+                    "corrections": {"type": "string"},
+                },
+                "required": ["summary"],
+            },
+        )
 
 
 def yt_channel_feed_url(channel_id: str) -> str:
@@ -1517,6 +1539,112 @@ def build_summary_prompt(exclude_note: str, summary_limit: int = 250) -> str:
     )
 
 
+def summary_fact_lines(config: dict) -> list[str]:
+    raw = config.get("summary_fact_context") or []
+    if isinstance(raw, dict):
+        raw = raw.get("facts") or []
+    if not isinstance(raw, list):
+        return []
+    return [re.sub(r"\s+", " ", str(line)).strip() for line in raw if str(line).strip()]
+
+
+def build_summary_fact_check_prompt(exclude_note: str, summary_limit: int = 250, facts: list[str] | None = None) -> str:
+    target_limit = max(80, min(220, summary_limit - 30))
+    current_date = datetime.now(UTC).astimezone(tz.gettz("America/Los_Angeles")).date().isoformat()
+    fact_lines = facts or []
+    if fact_lines:
+        facts_text = "\n".join(f"- {line}" for line in fact_lines)
+    else:
+        facts_text = "- No current fact cache was provided. Do not make current-status claims unless the source material directly supports them."
+    return (
+        "You are checking a Bluesky summary draft before it posts. Treat the draft summary as untrusted. "
+        f"Today's date is {current_date}. "
+        "Use only the source material and current Blazers facts below. "
+        "If the draft makes an unsupported claim, stale current-status claim, or a claim that conflicts with the facts, rewrite it. "
+        "Be especially careful with current player, coach, front-office, ownership, contract, injury, and trade-status claims. "
+        "Do not present podcast discussion, speculation, hypotheticals, or old coaching/player references as verified current facts. "
+        "Prefer source-grounded wording like 'The episode discusses...' or 'The segment discusses...'. "
+        "Do not add new facts, names, stats, or context that are not in the source material. "
+        f"{exclude_note}\n\n"
+        f"Current Blazers facts:\n{facts_text}\n\n"
+        "Return JSON with fields: fact_check_passed (boolean), corrections (short string), "
+        f"summary (one complete sentence, <={target_limit} characters, neutral tone, no ellipsis)."
+    )
+
+
+def build_summary_fact_check_input(model_input: str, draft_summary: str) -> str:
+    return (
+        "Draft summary:\n"
+        f"{draft_summary}\n\n"
+        "Source material:\n"
+        f"{model_input}"
+    )
+
+
+def safe_fallback_summary(mode: str, limit: int) -> str:
+    if mode in ("national", "high_volume"):
+        text = "The segment discusses the Portland Trail Blazers. See the timestamped video link for the full conversation."
+    else:
+        text = "The episode discusses the Portland Trail Blazers. See the video link for the full conversation."
+    return clean_summary_text(text, limit)
+
+
+def fact_checked_summary_text(
+    settings: WorkerSettings,
+    db: Database,
+    summarizer: GeminiSummarizer,
+    config: dict,
+    poll_context: PollContext,
+    video_id: str,
+    mode: str,
+    model_input: str,
+    draft_summary: str,
+) -> str:
+    limit = settings.summary_post_char_limit
+    if not draft_summary:
+        return safe_fallback_summary(mode, limit)
+    if not poll_context.reserve_llm_call():
+        poll_context.llm_wait = True
+        poll_context.llm_wait_reason = "budget"
+        log("Gemini summary fact-check skipped; using safe fallback", video_id, "budget")
+        return safe_fallback_summary(mode, limit)
+    dlog(
+        settings,
+        "Gemini summary fact-check request",
+        poll_context.llm_calls,
+        "of",
+        settings.llm_max_calls_per_poll if settings.llm_max_calls_per_poll >= 0 else "unlimited",
+        video_id,
+    )
+    try:
+        review = summarizer.fact_check_summary_json(
+            build_summary_fact_check_prompt(
+                config.get("exclude_note", ""),
+                limit,
+                summary_fact_lines(config),
+            ),
+            build_summary_fact_check_input(model_input, draft_summary),
+        )
+    except LLMQuotaError as exc:
+        cooldown_until = db.set_llm_cooldown(exc.cooldown_until, exc.error_type)
+        poll_context.llm_wait = True
+        poll_context.llm_wait_reason = "cooldown"
+        log("Gemini summary fact-check unavailable; using safe fallback", video_id, exc.error_type, "cooldown until", cooldown_until.isoformat())
+        return safe_fallback_summary(mode, limit)
+    except LLMError as exc:
+        log("Gemini summary fact-check unavailable; using safe fallback", video_id, exc.error_type)
+        return safe_fallback_summary(mode, limit)
+
+    checked = clean_summary_text(review.get("summary") or "", limit)
+    if not checked:
+        log("Gemini summary fact-check returned empty summary; using safe fallback", video_id)
+        return safe_fallback_summary(mode, limit)
+    corrections = re.sub(r"\s+", " ", str(review.get("corrections") or "")).strip()
+    if corrections or not review.get("fact_check_passed", False) or checked != draft_summary:
+        dlog(settings, "Gemini summary fact-check repaired", video_id, corrections[:300])
+    return checked
+
+
 VIDEO_OK = "ok"
 VIDEO_RETRY_LATER = "retry_later"
 VIDEO_NOT_DUE = "not_due"
@@ -1666,7 +1794,18 @@ def handle_video(
         first_text = f"{link}\nBlazers conversation starts at {timestamp}. Video link timestamped."
     else:
         first_text = youtube_link(video_id)
-    second_text = clean_summary_text(output.get("summary") or "", settings.summary_post_char_limit)
+    draft_summary = clean_summary_text(output.get("summary") or "", settings.summary_post_char_limit)
+    second_text = fact_checked_summary_text(
+        settings,
+        db,
+        summarizer,
+        config,
+        poll_context,
+        video_id,
+        mode,
+        model_input,
+        draft_summary,
+    )
 
     posted = create_thread(
         settings,
