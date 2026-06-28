@@ -1522,6 +1522,52 @@ def clean_summary_text(text: str, limit: int) -> str:
     return cut.rstrip(" ,;:-")
 
 
+CANONICAL_SUMMARY_NAME_RULES = [
+    {"canonical": "Micah Nori", "aliases": ["mika nori", "micah nory", "micha nori", "mika nory"]},
+    {
+        "canonical": "Micah Nori",
+        "aliases": ["mori"],
+        "requires_any": ["coach", "coaching", "head coach", "staff", "bench"],
+    },
+    {"canonical": "Deni Avdija", "aliases": ["deni avdia", "denny avdija", "denny avdia", "danny avdija", "deni avidja", "deni avidia"]},
+    {"canonical": "Shaedon Sharpe", "aliases": ["shaydon sharp", "shaden sharp", "shaeden sharpe", "shadeon sharpe", "shaedon sharp"]},
+    {"canonical": "Toumani Camara", "aliases": ["tumani camara", "toumani camera", "toumani kamara"]},
+    {"canonical": "Matisse Thybulle", "aliases": ["matisse thible", "matisse theibel", "matisse thighbulle"]},
+    {"canonical": "Vit Krejci", "aliases": ["veet krejci", "vit crejci", "vite krejci", "vit kreichee"]},
+    {"canonical": "Sidy Cissoko", "aliases": ["sidi cissoko", "sidy sisoko", "sidy cissoco", "city sissoko"]},
+    {"canonical": "Donovan Clingan", "aliases": ["donovan clingon", "donovan clinken", "donovan clingen"]},
+    {"canonical": "Jerami Grant", "aliases": ["jeremy grant", "jerami grand"]},
+    {"canonical": "Jrue Holiday", "aliases": ["drew holiday", "jrue holliday", "drew holliday", "jru holiday"]},
+    {"canonical": "Yang Hansen", "aliases": ["young hansen", "yang hanson", "young hanson", "yan hansen"]},
+    {"canonical": "Blake Wesley", "aliases": ["blake wesly", "blake westley"]},
+]
+
+
+def summary_context_has_any(text: str, phrases: list[str]) -> bool:
+    normalized_text = " " + re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip() + " "
+    for phrase in phrases:
+        normalized_phrase = " " + re.sub(r"[^a-z0-9]+", " ", str(phrase or "").lower()).strip() + " "
+        if normalized_phrase.strip() and normalized_phrase in normalized_text:
+            return True
+    return False
+
+
+def replace_summary_alias(text: str, alias: str, canonical: str) -> str:
+    pattern = re.compile(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", flags=re.IGNORECASE)
+    return pattern.sub(canonical, text)
+
+
+def canonicalize_summary_proper_names(text: str) -> str:
+    result = str(text or "")
+    for rule in CANONICAL_SUMMARY_NAME_RULES:
+        required_context = rule.get("requires_any") or []
+        if required_context and not summary_context_has_any(result, required_context):
+            continue
+        for alias in rule.get("aliases", []):
+            result = replace_summary_alias(result, alias, rule["canonical"])
+    return result
+
+
 def build_summary_prompt(exclude_note: str, summary_limit: int = 250) -> str:
     target_limit = max(80, min(220, summary_limit - 30))
     return (
@@ -1635,7 +1681,7 @@ def fact_checked_summary_text(
         log("Gemini summary fact-check unavailable; using safe fallback", video_id, exc.error_type)
         return safe_fallback_summary(mode, limit)
 
-    checked = clean_summary_text(review.get("summary") or "", limit)
+    checked = clean_summary_text(canonicalize_summary_proper_names(review.get("summary") or ""), limit)
     if not checked:
         log("Gemini summary fact-check returned empty summary; using safe fallback", video_id)
         return safe_fallback_summary(mode, limit)

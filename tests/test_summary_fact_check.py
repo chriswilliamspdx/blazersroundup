@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT / "worker"))
 from main import (  # noqa: E402
     build_summary_fact_check_input,
     build_summary_fact_check_prompt,
+    canonicalize_summary_proper_names,
     safe_fallback_summary,
     summary_fact_lines,
 )
@@ -51,6 +52,27 @@ class SummaryFactCheckTests(unittest.TestCase):
         facts = summary_fact_lines({"summary_fact_context": ["  One   fact.  ", "", "Two fact."]})
 
         self.assertEqual(facts, ["One fact.", "Two fact."])
+
+    def test_canonicalizes_mori_in_coaching_context(self):
+        text = "The episode notes questions about the team's direction and pressure on head coach Mori."
+
+        self.assertEqual(
+            canonicalize_summary_proper_names(text),
+            "The episode notes questions about the team's direction and pressure on head coach Micah Nori.",
+        )
+
+    def test_does_not_canonicalize_standalone_mori_without_context(self):
+        text = "The episode briefly mentions Mori in passing."
+
+        self.assertEqual(canonicalize_summary_proper_names(text), text)
+
+    def test_canonicalizes_high_confidence_name_variants(self):
+        text = "Shaydon Sharp, Deni Avdia, Toumani Camera, and Donovan Clingen are discussed."
+
+        self.assertEqual(
+            canonicalize_summary_proper_names(text),
+            "Shaedon Sharpe, Deni Avdija, Toumani Camara, and Donovan Clingan are discussed.",
+        )
 
 
 if __name__ == "__main__":
