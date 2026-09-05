@@ -57,7 +57,7 @@ class SummaryFactCheckTests(unittest.TestCase):
         text = "The episode notes questions about the team's direction and pressure on head coach Mori."
 
         self.assertEqual(
-            canonicalize_summary_proper_names(text),
+            canonicalize_summary_proper_names(text, mode="blazers"),
             "The episode notes questions about the team's direction and pressure on head coach Micah Nori.",
         )
 
@@ -70,7 +70,7 @@ class SummaryFactCheckTests(unittest.TestCase):
         text = "Shaydon Sharp, Deni Avdia, Toumani Camera, and Donovan Clingen are discussed."
 
         self.assertEqual(
-            canonicalize_summary_proper_names(text),
+            canonicalize_summary_proper_names(text, mode="blazers"),
             "Shaedon Sharpe, Deni Avdija, Toumani Camara, and Donovan Clingan are discussed.",
         )
 

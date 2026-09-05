@@ -38,6 +38,10 @@ Before enabling live worker posting, visit `/session/status` on the web service 
 - **Blazers-specific podcasts**: summarize the newest episode.
   1. Post 1: YouTube episode link first, with a YouTube external card embed.
   2. Post 2: neutral episode summary, max 250 chars by default.
+
+Podcast summaries use source evidence and canonical identity references before
+posting. See [summary validation](docs/summary-accuracy.md) for reference freshness,
+fallback behavior and verification limits.
 - **Bluesky reposts**: optional lightweight scan of recent Bluesky posts. When enabled, the worker searches for Blazers keyword matches from the last 24 hours and asks `web` to repost non-junk posts that have reached the like threshold.
 - **News links**: optional lightweight scan of trusted RSS feeds plus Google News RSS searches from `config/news.yaml`. When enabled, the worker keeps only fresh Blazers-related links from the last 24 hours, filters blocked sources/topics, dedupes by canonical URL, and asks `web` to post the source article URL.
 
