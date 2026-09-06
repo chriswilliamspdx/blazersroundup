@@ -8,7 +8,8 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worker"))
 import main
 from summary_accuracy import (
-    canonicalize_summary_proper_names, reference_context, reference_is_fresh, validate_review,
+    canonicalize_summary_proper_names, evidence_catalog, reference_context, reference_is_fresh,
+    review_response_schema, unresolved_proper_names, validate_review,
 )
 
 
@@ -23,7 +24,7 @@ def review(**changes):
         "blazers_context_confirmed": True,
         "current_status_claims": False,
         "entity_ids": ["ja_morant", "mike_richman", "sean_highkin"],
-        "source_evidence": [SOURCE],
+        "source_evidence_ids": ["E001"],
         "corrections": "Corrected names.",
     }
     result.update(changes)
@@ -70,7 +71,7 @@ class SummaryAccuracyTests(unittest.TestCase):
     def test_draft_cannot_create_identity_evidence(self):
         result = review(summary="The episode discusses Ja Morant's passing.", entity_ids=["ja_morant"])
         source = "The Trail Blazers episode discusses passing and defense."
-        result["source_evidence"] = [source]
+        result["source_evidence_ids"] = ["E001"]
         self.assertEqual(validate_review(result, source)[1], "unsupported_entity")
 
     def test_failed_missing_and_malformed_verdicts_fall_back(self):
@@ -83,14 +84,60 @@ class SummaryAccuracyTests(unittest.TestCase):
 
     def test_evidence_must_come_from_original_source(self):
         self.assertEqual(
-            validate_review(review(source_evidence=["Ja Morant is Portland's newest star."]), SOURCE)[1],
+            validate_review(review(source_evidence_ids=["E999"]), SOURCE)[1],
             "missing_source_evidence",
         )
         source = SOURCE + "\nDirect keyword hit in transcript: yes"
         self.assertEqual(
-            validate_review(review(source_evidence=["Direct keyword hit in transcript: yes"]), source)[1],
+            validate_review(review(source_evidence_ids=["E002"]), source)[1],
             "missing_source_evidence",
         )
+
+    def test_evidence_ids_cannot_be_replaced_by_altered_quotes(self):
+        result = review()
+        del result["source_evidence_ids"]
+        result["source_evidence"] = [SOURCE.replace("John", "Ja")]
+        self.assertEqual(validate_review(result, SOURCE)[1], "missing_source_evidence")
+        self.assertEqual(evidence_catalog(SOURCE), {"E001": SOURCE})
+
+    def test_team_names_do_not_require_person_ids(self):
+        source = "Mike Richmond discusses the Clippers on the Trail Blazers podcast."
+        result = review(
+            summary="Mike Richman discusses the Los Angeles Clippers on the Trail Blazers podcast.",
+            entity_ids=["mike_richman"],
+        )
+        self.assertEqual(validate_review(result, source)[1], "")
+        result["summary"] = result["summary"].replace("Los Angeles Clippers", "Connor Bergen")
+        self.assertEqual(validate_review(result, source)[1], "unresolved_proper_name")
+        result["summary"] = result["summary"].replace("Connor Bergen", "Los Angeles Lakers")
+        self.assertEqual(validate_review(result, source)[1], "unresolved_proper_name")
+
+    def test_schema_limits_ids_to_source_and_no_people_means_empty_array(self):
+        schema = review_response_schema(SOURCE)
+        self.assertNotIn("connor_bergen", schema["properties"]["entity_ids"]["items"]["enum"])
+        self.assertEqual(schema["properties"]["source_evidence_ids"]["items"]["enum"], ["E001"])
+        self.assertEqual(review_response_schema("Blazers discussion.")["properties"]["entity_ids"]["maxItems"], 0)
+        self.assertEqual(validate_review(review(entity_ids=["connor_bergen"]), SOURCE)[1], "unsupported_entity")
+
+    def test_reviewer_gets_specific_unverified_names_without_flagging_teams(self):
+        source = "Mike Richmond and guest Connor Bergen discuss the Clippers on the Blazers podcast."
+        draft = "Mike Richman and guest Connor Bergen discuss the Los Angeles Clippers."
+        self.assertEqual(unresolved_proper_names(draft, source, "blazers"), ["Connor Bergen"])
+        summarizer = Mock()
+        summarizer.fact_check_summary_json.return_value = review(fact_check_passed=False)
+        main.fact_checked_summary_text(
+            settings(), Mock(), summarizer, {}, main.PollContext(llm_limit=2),
+            "video01", "blazers", source, draft,
+        )
+        self.assertIn('Unverified names detected in the draft: ["Connor Bergen"]',
+                      summarizer.fact_check_summary_json.call_args.args[1])
+
+    def test_evidence_catalog_keeps_excerpts_verbatim_and_excludes_metadata(self):
+        source = "Feed type: blazers\nEpisode title: A Portland basketball discussion\nTranscript snippet:\n" + ("word " * 90) + "ends.\nShow name: Fake Person"
+        catalog = evidence_catalog(source)
+        self.assertGreater(len(catalog), 2)
+        self.assertTrue(all(excerpt in source for excerpt in catalog.values()))
+        self.assertFalse(any("Fake Person" in excerpt or "Feed type" in excerpt for excerpt in catalog.values()))
 
     def test_all_known_names_must_be_declared_and_unknown_names_removed(self):
         self.assertEqual(validate_review(review(entity_ids=[]), SOURCE)[1], "undeclared_entity")

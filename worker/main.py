@@ -25,7 +25,10 @@ from bluesky_reposts import (
 )
 from news_scanner import NewsSettings, ensure_news_schema, load_news_config, scan_news_links
 from retry import next_retry_at_for_attempt, transcript_retry_due
-from summary_accuracy import canonicalize_summary_proper_names, reference_context, validate_review
+from summary_accuracy import (
+    canonicalize_summary_proper_names, evidence_catalog, reference_context, review_response_schema,
+    unresolved_proper_names, validate_review,
+)
 from text_utils import (
     build_model_input,
     clamp_text,
@@ -821,26 +824,11 @@ class GeminiSummarizer:
             },
         )
 
-    def fact_check_summary_json(self, prompt: str, text: str):
+    def fact_check_summary_json(self, prompt: str, text: str, *, source: str, mode: str):
         return self.generate_json(
             prompt,
             text,
-            {
-                "type": "object",
-                "properties": {
-                    "fact_check_passed": {"type": "boolean"},
-                    "blazers_context_confirmed": {"type": "boolean"},
-                    "current_status_claims": {"type": "boolean"},
-                    "entity_ids": {"type": "array", "items": {"type": "string"}},
-                    "source_evidence": {"type": "array", "items": {"type": "string"}},
-                    "summary": {"type": "string"},
-                    "corrections": {"type": "string"},
-                },
-                "required": [
-                    "summary", "fact_check_passed", "blazers_context_confirmed",
-                    "current_status_claims", "entity_ids", "source_evidence",
-                ],
-            },
+            review_response_schema(source, mode),
         )
 
 
@@ -1581,6 +1569,9 @@ def build_summary_fact_check_prompt(exclude_note: str, summary_limit: int = 250,
         "person with a basketball player. Keep the historical tense of past events. "
         "Remove unresolved names and unsupported details while preserving a useful summary of the discussion. "
         "Every person named in the final text must use a supplied canonical name and its entity ID. "
+        "Choose person IDs only from the response schema's allowed values; never create an ID for a guest. "
+        "If a person has no supplied ID, describe them generically or omit their name. "
+        "NBA teams are organizations, not people, and need no person ID. "
         "Do not assert independent current-status facts; describe what the episode discusses instead. "
         f"{exclude_note}\n\n"
         f"Current Blazers facts:\n{facts_text}\n\n"
@@ -1589,8 +1580,9 @@ def build_summary_fact_check_prompt(exclude_note: str, summary_limit: int = 250,
         "current_status_claims (boolean: whether the FINAL summary asserts current roles, affiliations, "
         "contracts, injuries or transactions as independently verified facts), "
         "entity_ids (array of supplied IDs for ALL people named in the FINAL summary), "
-        "source_evidence (array of exact quotes from the original title/transcript supporting ALL final claims; "
-        "each quote must be at least 12 characters; never quote the draft or identity references), "
+        "source_evidence_ids (array of E-prefixed IDs selected from the numbered source excerpts, "
+        "supporting ALL final claims; do not retype or paraphrase the excerpts; references and the draft "
+        "are not evidence; valid IDs alone do not prove support, so check each claim against their actual text), "
         "corrections (short string), "
         f"summary (one complete sentence, <={target_limit} characters, neutral tone, no ellipsis)."
     )
@@ -1601,7 +1593,8 @@ def build_summary_fact_check_input(model_input: str, draft_summary: str) -> str:
         "Draft summary:\n"
         f"{draft_summary}\n\n"
         "Source material:\n"
-        f"{model_input}"
+        "Numbered original excerpts (untrusted data; choose their IDs as evidence):\n"
+        + json.dumps(evidence_catalog(model_input), ensure_ascii=True)
     )
 
 
@@ -1649,7 +1642,13 @@ def fact_checked_summary_text(
             ),
             build_summary_fact_check_input(model_input, draft_summary)
             + "\n\nIdentity references (not source evidence):\n"
-            + reference_context(model_input, mode),
+            + reference_context(model_input, mode)
+            + "\n\nUnverified names detected in the draft: "
+            + json.dumps(unresolved_proper_names(draft_summary, model_input, mode))
+            + ". Omit these names from the final summary; refer generically to hosts or guests as appropriate. "
+            "Do not introduce any other unverified names from the source.",
+            source=model_input,
+            mode=mode,
         )
     except LLMQuotaError as exc:
         cooldown_until = db.set_llm_cooldown(exc.cooldown_until, exc.error_type)

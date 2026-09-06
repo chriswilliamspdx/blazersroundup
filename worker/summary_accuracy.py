@@ -8,6 +8,68 @@ from functools import lru_cache
 from pathlib import Path
 
 
+# Team identities, not people or evidence of an episode's subject: https://www.nba.com/teams
+NBA_TEAMS = (
+    "Atlanta Hawks", "Boston Celtics", "Brooklyn Nets", "Charlotte Hornets", "Chicago Bulls",
+    "Cleveland Cavaliers", "Dallas Mavericks", "Denver Nuggets", "Detroit Pistons",
+    "Golden State Warriors", "Houston Rockets", "Indiana Pacers", "LA Clippers",
+    "Los Angeles Lakers", "Memphis Grizzlies", "Miami Heat", "Milwaukee Bucks",
+    "Minnesota Timberwolves", "New Orleans Pelicans", "New York Knicks", "Oklahoma City Thunder",
+    "Orlando Magic", "Philadelphia 76ers", "Phoenix Suns", "Portland Trail Blazers",
+    "Sacramento Kings", "San Antonio Spurs", "Toronto Raptors", "Utah Jazz", "Washington Wizards",
+)
+
+
+def organization_names(source):
+    names = []
+    for team in NBA_TEAMS:
+        nickname = "Trail Blazers" if team == "Portland Trail Blazers" else team.rsplit(" ", 1)[-1]
+        if contains(source, team) or contains(source, nickname):
+            names.extend((team, nickname))
+            if team == "LA Clippers":
+                names.append("Los Angeles Clippers")
+    return names
+
+
+def evidence_catalog(source):
+    """Assign stable IDs to unmodified excerpts; exclude worker metadata."""
+    source = re.sub(
+        r"(?m)^(?:Feed type|YouTube video ID|Direct keyword hit in transcript|Show name):.*$", "", source,
+    )
+    source = re.sub(r"(?m)^Transcript snippet:\s*$", "", source)
+    source = re.sub(r"(?m)^Episode title:\s*", "", source)
+    excerpts = []
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", source):
+        for match in re.finditer(r"\S+(?:\s+\S+){0,39}", sentence):
+            excerpt = match.group()
+            if len(normalized(excerpt)) >= 12:
+                excerpts.append(excerpt)
+    return {f"E{index:03d}": excerpt for index, excerpt in enumerate(excerpts, 1)}
+
+
+def review_response_schema(source, mode=""):
+    def selection(values, required=False):
+        field = {"type": "array", "items": {"type": "string"}}
+        if values:
+            field["items"]["enum"] = values
+            if required:
+                field["minItems"] = 1
+        else:
+            field["maxItems"] = 0
+        return field
+
+    fields = {
+        "fact_check_passed": {"type": "boolean"},
+        "blazers_context_confirmed": {"type": "boolean"},
+        "current_status_claims": {"type": "boolean"},
+        "entity_ids": selection([e["id"] for e in supported_entities(source, mode)]),
+        "source_evidence_ids": selection(list(evidence_catalog(source)), required=True),
+        "summary": {"type": "string"},
+        "corrections": {"type": "string"},
+    }
+    return {"type": "object", "properties": fields, "required": [k for k in fields if k != "corrections"]}
+
+
 def normalized(text):
     text = unicodedata.normalize("NFKD", str(text or ""))
     text = "".join(c for c in text if not unicodedata.combining(c))
@@ -98,6 +160,21 @@ def reference_context(source, mode="", show_name="", today=None):
     return "\n".join(lines)
 
 
+def unresolved_proper_names(text, source, mode="", show_name="", entity_ids=None):
+    allowed = []
+    for row in supported_entities(source, mode, show_name):
+        if entity_ids is None or row["id"] in entity_ids:
+            allowed.append(row["name"])
+            if entity_ids is None:
+                allowed.extend(row["observed_forms"])
+    allowed += ["Portland Trail Blazers", "Trail Blazers", "Rip City", "Locked On Blazers", "Rose Garden Report", "NBA"]
+    allowed += organization_names(source)
+    remaining = text
+    for name in sorted(set(allowed), key=len, reverse=True):
+        remaining = re.sub(r"(?<!\w)" + re.escape(name) + r"(?!\w)", "", remaining, flags=re.IGNORECASE)
+    return re.findall(r"\b[A-Z][A-Za-z]*(?:['\u2019-][A-Za-z]+)*(?:\s+[A-Z][A-Za-z]*(?:['\u2019-][A-Za-z]+)*)+\b", remaining)
+
+
 def validate_review(review, source, mode="", show_name="", limit=250):
     """Return a supported final summary or a reason to use the neutral fallback."""
     if not isinstance(review, dict) or review.get("fact_check_passed") is not True:
@@ -111,13 +188,10 @@ def validate_review(review, source, mode="", show_name="", limit=250):
     if not isinstance(text, str) or not text.strip():
         return "", "empty_summary"
     text = " ".join(text.split())
-    evidence = review.get("source_evidence")
-    evidence_source = re.sub(
-        r"(?m)^(?:Feed type|YouTube video ID|Direct keyword hit in transcript|Show name):.*$", "", source
-    )
+    evidence = review.get("source_evidence_ids")
+    catalog = evidence_catalog(source)
     if not isinstance(evidence, list) or not evidence or not all(
-        isinstance(quote, str) and len(normalized(quote)) >= 12 and contains(evidence_source, quote)
-        for quote in evidence
+        isinstance(item, str) and item in catalog for item in evidence
     ):
         return "", "missing_source_evidence"
     ids = review.get("entity_ids")
@@ -137,12 +211,7 @@ def validate_review(review, source, mode="", show_name="", limit=250):
     if any(not contains(text, supported[item]["name"]) for item in ids):
         return "", "unused_entity"
     # Unknown multiword proper names must be removed by the reviewer, not guessed.
-    allowed_names = [supported[item]["name"] for item in ids]
-    allowed_names += ["Portland Trail Blazers", "Trail Blazers", "Rip City", "Locked On Blazers", "Rose Garden Report", "NBA"]
-    remaining = text
-    for name in sorted(allowed_names, key=len, reverse=True):
-        remaining = re.sub(r"(?<!\w)" + re.escape(name) + r"(?!\w)", "", remaining, flags=re.IGNORECASE)
-    if re.search(r"\b[A-Z][A-Za-z]*(?:['\u2019-][A-Za-z]+)*\s+[A-Z][A-Za-z]*(?:['\u2019-][A-Za-z]+)*\b", remaining):
+    if unresolved_proper_names(text, source, mode, show_name, entity_ids=ids):
         return "", "unresolved_proper_name"
     if len(text) > min(limit, 250) or "..." in text or "\u2026" in text:
         return "", "length_or_truncation"

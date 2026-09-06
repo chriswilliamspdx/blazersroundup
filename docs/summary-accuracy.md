@@ -24,10 +24,16 @@ Mori requires a coaching reference and team context. Missing identities are
 omitted from the rewritten summary instead of guessed.
 
 The reviewer must return a verdict for the final rewritten summary, confirmed
-Blazers context, all named entity IDs, and supporting excerpts from the original
-title/transcript. The validator checks that evidence exists, IDs refer to people
+Blazers context, all named entity IDs, and IDs selecting supporting excerpts from
+the original title/transcript. The response schema restricts both lists to supplied
+values. Excerpts are numbered locally and are not retyped by the model, preventing
+quote drift caused by omitted filler words. The validator checks that evidence
+IDs exist, person IDs refer to people
 present in the source, known names are canonical, and unresolved multiword proper
 names do not pass. References and the draft do not count as episode evidence.
+NBA team names are handled separately from people when the team or its nickname
+is present in the source. Team names follow the [NBA team directory](https://www.nba.com/teams),
+including the Los Angeles Clippers spelling used in summaries.
 
 Replies describe source discussion without asserting independently verified
 current-status claims about roles, affiliations, contracts, injuries or trades.
@@ -50,8 +56,8 @@ There are no new Railway variables, database migrations or web-service changes.
 ## Limits and verification
 
 This is source-grounded review with a dated identity reference, not independent
-live-web verification of every claim. Evidence substring checks prove the quoted
-text exists; the model still judges whether it supports the summary. The
+live-web verification of every claim. Evidence IDs select actual source excerpts;
+the model still judges whether they support the summary. The
 proper-name heuristic is intentionally conservative and can fall back for a
 legitimate unknown name. A live dry run is needed to measure that rate and Gemini
 schema compliance.
