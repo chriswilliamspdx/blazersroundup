@@ -3,15 +3,65 @@
   "status_max_age_days": 14,
   "entities": [
     {
-      "id": "ja_morant",
-      "name": "Ja Morant",
+      "id": "jayson_kent",
+      "name": "Jayson Kent",
       "aliases": [
-        "john morant",
-        "jah morant",
-        "ja morrant"
+        "jason kent"
       ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
+      "role": "Portland Trail Blazers player listed on NBA roster; contract status not independently asserted",
+      "source": "https://www.nba.com/team/1610612757/blazers"
+    },
+    {
+      "id": "damian_lillard",
+      "name": "Damian Lillard",
+      "aliases": [
+        "dame lillard",
+        "damien lillard",
+        "damian lilliard"
+      ],
+      "role": "Portland Trail Blazers player listed on NBA roster",
+      "source": "https://www.nba.com/team/1610612757/blazers"
+    },
+    {
+      "id": "scoot_henderson",
+      "name": "Scoot Henderson",
+      "aliases": [
+        "scott henderson",
+        "scoot hendersen"
+      ],
+      "role": "Portland Trail Blazers player listed on NBA roster",
+      "source": "https://www.nba.com/team/1610612757/blazers"
+    },
+    {
+      "id": "blake_wesley",
+      "name": "Blake Wesley",
+      "aliases": [
+        "blake wesly",
+        "blake westley"
+      ],
+      "role": "Portland Trail Blazers player listed on NBA roster; contract status not independently asserted",
+      "source": "https://www.nba.com/team/1610612757/blazers"
+    },
+    {
+      "id": "chris_youngblood",
+      "name": "Chris Youngblood",
+      "aliases": [
+        "chris young blood"
+      ],
+      "role": "Portland Trail Blazers player listed on NBA roster",
+      "source": "https://www.nba.com/team/1610612757/blazers"
+    },
+    {
+      "id": "jrue_holiday",
+      "name": "Jrue Holiday",
+      "aliases": [
+        "drew holiday",
+        "jrue holliday",
+        "drew holliday",
+        "jru holiday"
+      ],
+      "role": "Portland Trail Blazers player listed on NBA roster",
+      "source": "https://www.nba.com/team/1610612757/blazers"
     },
     {
       "id": "deni_avdija",
@@ -24,8 +74,59 @@
         "deni avidja",
         "deni avidia"
       ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
+      "role": "Portland Trail Blazers player listed on NBA roster",
+      "source": "https://www.nba.com/team/1610612757/blazers"
+    },
+    {
+      "id": "john_tonje",
+      "name": "John Tonje",
+      "aliases": [
+        "john tonjay"
+      ],
+      "role": "Portland Trail Blazers roster listing",
+      "source": "https://www.nba.com/team/1610612757/blazers"
+    },
+    {
+      "id": "micah_potter",
+      "name": "Micah Potter",
+      "aliases": [
+        "mika potter"
+      ],
+      "role": "Portland Trail Blazers roster listing",
+      "source": "https://www.nba.com/team/1610612757/blazers"
+    },
+    {
+      "id": "ja_morant",
+      "name": "Ja Morant",
+      "aliases": [
+        "john morant",
+        "jah morant",
+        "ja morrant"
+      ],
+      "role": "Portland Trail Blazers player listed on NBA roster",
+      "source": "https://www.nba.com/team/1610612757/blazers"
+    },
+    {
+      "id": "branden_carlson",
+      "name": "Branden Carlson",
+      "aliases": [
+        "brandon carlson",
+        "branden carlsen"
+      ],
+      "role": "Portland Trail Blazers roster listing",
+      "source": "https://www.nba.com/team/1610612757/blazers"
+    },
+    {
+      "id": "yang_hansen",
+      "name": "Yang Hansen",
+      "aliases": [
+        "young hansen",
+        "yang hanson",
+        "young hanson",
+        "yan hansen"
+      ],
+      "role": "Portland Trail Blazers roster listing",
+      "source": "https://www.nba.com/team/1610612757/blazers"
     },
     {
       "id": "shaedon_sharpe",
@@ -37,31 +138,17 @@
         "shadeon sharpe",
         "shaedon sharp"
       ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
+      "role": "Portland Trail Blazers roster listing",
+      "source": "https://www.nba.com/team/1610612757/blazers"
     },
     {
-      "id": "toumani_camara",
-      "name": "Toumani Camara",
+      "id": "jeremy_sochan",
+      "name": "Jeremy Sochan",
       "aliases": [
-        "tumani camara",
-        "toumani camera",
-        "toumani kamara"
+        "jeremy sohan"
       ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
-    },
-    {
-      "id": "sidy_cissoko",
-      "name": "Sidy Cissoko",
-      "aliases": [
-        "sidi cissoko",
-        "sidy sisoko",
-        "sidy cissoco",
-        "city sissoko"
-      ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
+      "role": "Portland Trail Blazers roster listing",
+      "source": "https://www.nba.com/team/1610612757/blazers"
     },
     {
       "id": "donovan_clingan",
@@ -71,32 +158,8 @@
         "donovan clinken",
         "donovan clingen"
       ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
-    },
-    {
-      "id": "jrue_holiday",
-      "name": "Jrue Holiday",
-      "aliases": [
-        "drew holiday",
-        "jrue holliday",
-        "drew holliday",
-        "jru holiday"
-      ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
-    },
-    {
-      "id": "yang_hansen",
-      "name": "Yang Hansen",
-      "aliases": [
-        "young hansen",
-        "yang hanson",
-        "young hanson",
-        "yan hansen"
-      ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
+      "role": "Portland Trail Blazers roster listing",
+      "source": "https://www.nba.com/team/1610612757/blazers"
     },
     {
       "id": "vit_krejci",
@@ -107,29 +170,19 @@
         "vite krejci",
         "vit kreichee"
       ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
+      "role": "Portland Trail Blazers roster listing",
+      "source": "https://www.nba.com/team/1610612757/blazers"
     },
     {
-      "id": "scoot_henderson",
-      "name": "Scoot Henderson",
+      "id": "toumani_camara",
+      "name": "Toumani Camara",
       "aliases": [
-        "scott henderson",
-        "scoot hendersen"
+        "tumani camara",
+        "toumani camera",
+        "toumani kamara"
       ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
-    },
-    {
-      "id": "damian_lillard",
-      "name": "Damian Lillard",
-      "aliases": [
-        "dame lillard",
-        "damien lillard",
-        "damian lilliard"
-      ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
+      "role": "Portland Trail Blazers roster listing",
+      "source": "https://www.nba.com/team/1610612757/blazers"
     },
     {
       "id": "robert_williams",
@@ -139,63 +192,20 @@
         "rob williams",
         "robert william"
       ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
+      "role": "Portland Trail Blazers player listed on NBA roster",
+      "source": "https://www.nba.com/team/1610612757/blazers"
     },
     {
-      "id": "branden_carlson",
-      "name": "Branden Carlson",
+      "id": "sidy_cissoko",
+      "name": "Sidy Cissoko",
       "aliases": [
-        "brandon carlson",
-        "branden carlsen"
+        "sidi cissoko",
+        "sidy sisoko",
+        "sidy cissoco",
+        "city sissoko"
       ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
-    },
-    {
-      "id": "micah_potter",
-      "name": "Micah Potter",
-      "aliases": [
-        "mika potter"
-      ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
-    },
-    {
-      "id": "jeremy_sochan",
-      "name": "Jeremy Sochan",
-      "aliases": [
-        "jeremy sohan"
-      ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
-    },
-    {
-      "id": "john_tonje",
-      "name": "John Tonje",
-      "aliases": [
-        "john tonjay"
-      ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
-    },
-    {
-      "id": "jayson_kent",
-      "name": "Jayson Kent",
-      "aliases": [
-        "jason kent"
-      ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
-    },
-    {
-      "id": "chris_youngblood",
-      "name": "Chris Youngblood",
-      "aliases": [
-        "chris young blood"
-      ],
-      "role": "Portland Trail Blazers player",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
+      "role": "Portland Trail Blazers roster listing",
+      "source": "https://www.nba.com/team/1610612757/blazers"
     },
     {
       "id": "micah_nori",
@@ -207,7 +217,41 @@
         "mika nory"
       ],
       "role": "Portland Trail Blazers head coach",
-      "source": "https://nbacoaches.com/micah-nori/"
+      "source": "https://www.nba.com/team/1610612757/blazers"
+    },
+    {
+      "id": "james_posey",
+      "name": "James Posey",
+      "aliases": [
+        "james posy"
+      ],
+      "role": "Portland Trail Blazers assistant coach",
+      "source": "https://www.nba.com/team/1610612757/blazers"
+    },
+    {
+      "id": "quinton_crawford",
+      "name": "Quinton Crawford",
+      "aliases": [
+        "quenton crawford"
+      ],
+      "role": "Portland Trail Blazers assistant coach",
+      "source": "https://www.nba.com/team/1610612757/blazers"
+    },
+    {
+      "id": "ronnie_burrell",
+      "name": "Ronnie Burrell",
+      "aliases": [
+        "ronny burrell"
+      ],
+      "role": "Portland Trail Blazers assistant coach",
+      "source": "https://www.nba.com/team/1610612757/blazers"
+    },
+    {
+      "id": "nate_bjorkgren",
+      "name": "Nate Bjorkgren",
+      "aliases": [],
+      "role": "Portland Trail Blazers assistant coach",
+      "source": "https://www.nba.com/team/1610612757/blazers"
     },
     {
       "id": "joe_cronin",
@@ -216,7 +260,7 @@
         "joe cronan"
       ],
       "role": "Portland Trail Blazers general manager",
-      "source": "https://www.nba.com/blazers/frontoffice"
+      "source": "https://www.nba.com/blazers/news/portland-trail-blazers-sign-general-manager-joe-cronin-to-contract-extension"
     },
     {
       "id": "andrae_patterson",
@@ -225,16 +269,7 @@
         "andre patterson"
       ],
       "role": "Portland Trail Blazers assistant general manager",
-      "source": "https://www.nba.com/blazers/frontoffice"
-    },
-    {
-      "id": "sergi_oliva",
-      "name": "Sergi Oliva",
-      "aliases": [
-        "sergey oliva"
-      ],
-      "role": "Portland Trail Blazers assistant general manager",
-      "source": "https://www.nba.com/blazers/frontoffice"
+      "source": "https://www.nba.com/blazers/andrae-patterson"
     },
     {
       "id": "tom_dundon",
@@ -243,7 +278,77 @@
         "tom dundin"
       ],
       "role": "Portland Trail Blazers governor",
-      "source": "https://www.750thegame.com/rip-city-rising-ownership-group-led-by-tom-dundon-assumes-control-of-the-portland-trail-blazers/"
+      "source": "https://www.nba.com/blazers/frontoffice"
+    },
+    {
+      "id": "marc_zahr",
+      "name": "Marc Zahr",
+      "aliases": [],
+      "role": "Portland Trail Blazers alternate governor",
+      "source": "https://www.nba.com/blazers/frontoffice"
+    },
+    {
+      "id": "stan_middleman",
+      "name": "Stan Middleman",
+      "aliases": [],
+      "role": "Portland Trail Blazers alternate governor",
+      "source": "https://www.nba.com/blazers/frontoffice"
+    },
+    {
+      "id": "andrew_cherng",
+      "name": "Andrew Cherng",
+      "aliases": [],
+      "role": "Portland Trail Blazers alternate governor",
+      "source": "https://www.nba.com/blazers/frontoffice"
+    },
+    {
+      "id": "sheel_tyle",
+      "name": "Sheel Tyle",
+      "aliases": [],
+      "role": "Portland Trail Blazers alternate governor",
+      "source": "https://www.nba.com/blazers/frontoffice"
+    },
+    {
+      "id": "richard_chaifetz",
+      "name": "Richard Chaifetz",
+      "aliases": [],
+      "role": "Portland Trail Blazers owner",
+      "source": "https://www.nba.com/blazers/frontoffice"
+    },
+    {
+      "id": "marc_grandisson",
+      "name": "Marc Grandisson",
+      "aliases": [],
+      "role": "Portland Trail Blazers owner",
+      "source": "https://www.nba.com/blazers/frontoffice"
+    },
+    {
+      "id": "jennifer_gates",
+      "name": "Jennifer Gates",
+      "aliases": [],
+      "role": "Portland Trail Blazers owner",
+      "source": "https://www.nba.com/blazers/frontoffice"
+    },
+    {
+      "id": "nayel_nassar",
+      "name": "Nayel Nassar",
+      "aliases": [],
+      "role": "Portland Trail Blazers owner",
+      "source": "https://www.nba.com/blazers/frontoffice"
+    },
+    {
+      "id": "taavet_hinrikus",
+      "name": "Taavet Hinrikus",
+      "aliases": [],
+      "role": "Portland Trail Blazers owner",
+      "source": "https://www.nba.com/blazers/frontoffice"
+    },
+    {
+      "id": "dan_zilberman",
+      "name": "Dan Zilberman",
+      "aliases": [],
+      "role": "Portland Trail Blazers owner",
+      "source": "https://www.nba.com/blazers/frontoffice"
     },
     {
       "id": "mike_richman",
@@ -265,6 +370,56 @@
       ],
       "role": "The Rose Garden Report writer",
       "source": "https://www.rosegardenreport.com/about"
+    },
+    {
+      "id": "mike_schmitz",
+      "name": "Mike Schmitz",
+      "aliases": [],
+      "role": "historical Portland Trail Blazers assistant general manager; later identified by NBA.com as Dallas Mavericks general manager",
+      "source": "https://www.nba.com/news/dallas-mavericks-name-mike-schimitz-general-manager"
+    },
+    {
+      "id": "sergi_oliva",
+      "name": "Sergi Oliva",
+      "aliases": [
+        "sergey oliva"
+      ],
+      "role": "Portland Trail Blazers assistant general manager; current status requires follow-up verification",
+      "source": "https://www.nba.com/news/trail-blazers-fined-scouting-rules"
+    },
+    {
+      "id": "dewayne_hankins",
+      "name": "Dewayne Hankins",
+      "aliases": [
+        "dewayne hankins"
+      ],
+      "role": "Portland Trail Blazers president, business operations",
+      "source": "https://www.nba.com/blazers/dewayne-hankins"
+    },
+    {
+      "id": "joe_loomis",
+      "name": "Joe Loomis",
+      "aliases": [
+        "joe loomis"
+      ],
+      "role": "Portland Trail Blazers executive vice president, chief financial officer",
+      "source": "https://www.nba.com/blazers/frontoffice"
+    },
+    {
+      "id": "galen_davies",
+      "name": "Galen Davies",
+      "aliases": [
+        "galen davies"
+      ],
+      "role": "Portland Trail Blazers executive vice president, chief revenue officer",
+      "source": "https://www.nba.com/blazers/galen-davies"
+    },
+    {
+      "id": "jody_allen",
+      "name": "Jody Allen",
+      "aliases": [],
+      "role": "former Portland Trail Blazers chair and historical owner reference",
+      "source": "https://www.nba.com/news/blazers-sale-tom-dundon-ok-nba-board-governors"
     },
     {
       "id": "jerami_grant",
@@ -296,16 +451,6 @@
       ],
       "role": "former Portland Trail Blazers player",
       "source": "https://cdn-uat.nba.com/news/nba-offseason-deals-2026"
-    },
-    {
-      "id": "blake_wesley",
-      "name": "Blake Wesley",
-      "aliases": [
-        "blake wesly",
-        "blake westley"
-      ],
-      "role": "not on the signed Portland roster; retained free-agent rights",
-      "source": "https://basketball.realgm.com/nba/teams/Portland-Trail-Blazers/24/Rosters"
     },
     {
       "id": "caleb_love",

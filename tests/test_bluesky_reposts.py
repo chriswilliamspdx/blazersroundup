@@ -151,6 +151,88 @@ class BlueskyRepostTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "false_positive_context")
 
+    def test_context_required_owner_name_without_blazers_context_is_blocked(self):
+        ok, reason = candidate_reason(
+            post("Tom Dundon says the Hurricanes are ready for the playoffs.", likes=120),
+            keywords=["Tom Dundon"],
+            context_required_keywords=["Tom Dundon"],
+            junk_words=DEFAULT_JUNK_WORDS,
+            bot_handles=["blazersroundup.bsky.social"],
+            min_likes=50,
+            skip_replies=True,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "not_blazers_context")
+
+    def test_context_required_owner_name_with_explicit_trail_blazers_context_is_ready(self):
+        ok, reason = candidate_reason(
+            post("Tom Dundon is watching the Trail Blazers rebuild.", likes=120),
+            keywords=["Tom Dundon"],
+            context_required_keywords=["Tom Dundon"],
+            junk_words=DEFAULT_JUNK_WORDS,
+            bot_handles=["blazersroundup.bsky.social"],
+            min_likes=50,
+            skip_replies=True,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ready")
+
+    def test_aliased_context_required_owner_name_without_blazers_context_is_blocked(self):
+        ok, reason = candidate_reason(
+            post("Thomas Dundon discusses the Hurricanes offseason.", likes=120),
+            keywords=["Thomas Dundon"],
+            context_required_keywords=["Tom Dundon", "Thomas Dundon"],
+            junk_words=DEFAULT_JUNK_WORDS,
+            bot_handles=["blazersroundup.bsky.social"],
+            min_likes=50,
+            skip_replies=True,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "not_blazers_context")
+
+    def test_context_required_robert_williams_artist_without_blazers_context_is_blocked(self):
+        ok, reason = candidate_reason(
+            post("Robert Williams opens a new art exhibit this weekend.", likes=120),
+            keywords=["Robert Williams"],
+            context_required_keywords=["Robert Williams"],
+            junk_words=DEFAULT_JUNK_WORDS,
+            bot_handles=["blazersroundup.bsky.social"],
+            min_likes=50,
+            skip_replies=True,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "not_blazers_context")
+
+    def test_current_player_keyword_keeps_existing_behavior(self):
+        ok, reason = candidate_reason(
+            post("Shaedon Sharpe is ready for the Blazers season.", likes=120),
+            keywords=["Shaedon Sharpe"],
+            junk_words=DEFAULT_JUNK_WORDS,
+            bot_handles=["blazersroundup.bsky.social"],
+            min_likes=50,
+            skip_replies=True,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ready")
+
+    def test_context_required_keywords_are_backward_compatible_when_omitted(self):
+        ok, reason = candidate_reason(
+            post("Tom Dundon is discussed in a basketball trade thread.", likes=120),
+            keywords=["Tom Dundon", "basketball"],
+            junk_words=DEFAULT_JUNK_WORDS,
+            bot_handles=["blazersroundup.bsky.social"],
+            min_likes=50,
+            skip_replies=True,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ready")
+
     def test_search_queries_use_keywords_but_skip_generic_portland(self):
         queries = build_search_queries(
             {"keywords_positive": ["portland", "trail blazers", "shaedon sharpe"]},
@@ -160,6 +242,58 @@ class BlueskyRepostTests(unittest.TestCase):
         self.assertIn('"trail blazers"', queries)
         self.assertIn('"shaedon sharpe"', queries)
         self.assertNotIn("portland", queries)
+
+    def test_search_queries_prioritize_canonical_search_keywords_under_cap(self):
+        queries = build_search_queries(
+            {
+                "keywords_positive": ["shaydon sharp", "old alias", "cronin"],
+                "keywords_search": ["Portland Trail Blazers", "Joe Cronin", "Joe Ingles"],
+            },
+            max_queries=7,
+        )
+
+        self.assertEqual(
+            queries,
+            [
+                '"portland trail blazers"',
+                '"trail blazers"',
+                '"rip city"',
+                "blazers",
+                '"joe cronin"',
+                '"joe ingles"',
+            ],
+        )
+        self.assertNotIn('"old alias"', queries)
+
+    def test_search_queries_keep_configured_override(self):
+        queries = build_search_queries(
+            {"keywords_search": ["Joe Cronin"]},
+            max_queries=10,
+            configured_queries=["custom phrase", "blazers", "custom phrase"],
+        )
+
+        self.assertEqual(queries, ['"custom phrase"', "blazers"])
+
+    def test_search_queries_fall_back_to_aliases_for_old_or_empty_configs(self):
+        old_config_queries = build_search_queries(
+            {"keywords_positive": ["shaydon sharp", "portland"]},
+            max_queries=10,
+        )
+        empty_canonical_queries = build_search_queries(
+            {"keywords_search": [], "keywords_positive": ["shaydon sharp", "portland"]},
+            max_queries=10,
+        )
+
+        self.assertIn('"shaydon sharp"', old_config_queries)
+        self.assertEqual(empty_canonical_queries, old_config_queries)
+
+    def test_search_queries_respect_max_queries(self):
+        queries = build_search_queries(
+            {"keywords_search": ["one", "two", "three"]},
+            max_queries=2,
+        )
+
+        self.assertEqual(len(queries), 2)
 
 
 if __name__ == "__main__":

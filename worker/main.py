@@ -1435,6 +1435,7 @@ def scan_bluesky_reposts(settings: WorkerSettings, db: Database, config: dict):
                 bot_handles=settings.bluesky_repost_bot_handles,
                 min_likes=settings.bluesky_repost_min_likes,
                 skip_replies=settings.bluesky_repost_skip_replies,
+                context_required_keywords=config.get("keywords_context_required", []),
             )
             if not ok:
                 skipped[reason] = skipped.get(reason, 0) + 1

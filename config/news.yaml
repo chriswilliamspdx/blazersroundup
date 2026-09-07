@@ -3,50 +3,112 @@ keywords_positive:
   - Trail Blazers
   - Blazers
   - Portland
-  - Deni Avdija
-  - Blake Wesley
-  - Sidy Cissoko
-  - Damian Lillard
-  - Caleb Love
-  - Yang Hansen
-  - Donovan Clingan
-  - Jrue Holiday
-  - Vit Krejci
-  - Robert Williams
-  - Jerami Grant
-  - Matisse Thybulle
-  - Toumani Camara
-  - Kris Murray
-  - Scoot Henderson
-  - Shaedon Sharpe
   - Micah Nori
   - Mika Nori
   - Micah Nory
   - Micha Nori
+  - Robert Williams
+  - Jayson Kent
+  - Damian Lillard
+  - Scoot Henderson
+  - Blake Wesley
+  - Chris Youngblood
+  - Jrue Holiday
+  - Deni Avdija
+  - John Tonje
+  - Micah Potter
+  - Ja Morant
+  - Branden Carlson
+  - Yang Hansen
+  - Shaedon Sharpe
+  - Jeremy Sochan
+  - Donovan Clingan
+  - Vit Krejci
+  - Toumani Camara
+  - Robert Williams III
+  - Sidy Cissoko
+  - James Posey
+  - Quinton Crawford
+  - Ronnie Burrell
+  - Nate Bjorkgren
   - Rip City
   - Joe Cronin
+  - Andrae Patterson
   - Rip City Remix
   - Tom Dundon
+  - Marc Zahr
+  - Stan Middleman
+  - Andrew Cherng
+  - Sheel Tyle
+  - Richard Chaifetz
+  - Marc Grandisson
+  - Jennifer Gates
+  - Nayel Nassar
+  - Taavet Hinrikus
+  - Dan Zilberman
+  - Dewayne Hankins
+  - Joe Loomis
+  - Galen Davies
+  - Sergi Oliva
   - Moda Center
 
 player_name_keywords:
-  - Deni Avdija
-  - Blake Wesley
-  - Sidy Cissoko
+  - Jayson Kent
   - Damian Lillard
-  - Caleb Love
-  - Yang Hansen
-  - Donovan Clingan
-  - Jrue Holiday
-  - Vit Krejci
-  - Robert Williams
-  - Jerami Grant
-  - Matisse Thybulle
-  - Toumani Camara
-  - Kris Murray
   - Scoot Henderson
+  - Blake Wesley
+  - Chris Youngblood
+  - Jrue Holiday
+  - Deni Avdija
+  - John Tonje
+  - Micah Potter
+  - Ja Morant
+  - Branden Carlson
+  - Yang Hansen
   - Shaedon Sharpe
+  - Jeremy Sochan
+  - Donovan Clingan
+  - Vit Krejci
+  - Toumani Camara
+  - Robert Williams III
+  - Sidy Cissoko
   - Micah Nori
+  - Mika Nori
+  - Micah Nory
+  - Micha Nori
+  - Mika Nory
+  - James Posey
+  - James Posy
+  - Quinton Crawford
+  - Quenton Crawford
+  - Ronnie Burrell
+  - Ronny Burrell
+  - Nate Bjorkgren
+  - Joe Cronin
+  - Joe Cronan
+  - Andrae Patterson
+  - Andre Patterson
+  - Sergi Oliva
+  - Sergey Oliva
+  - Dewayne Hankins
+  - Joe Loomis
+  - Galen Davies
+  - Tom Dundon
+  - Tom Dundin
+  - Marc Zahr
+  - Stan Middleman
+  - Andrew Cherng
+  - Sheel Tyle
+  - Richard Chaifetz
+  - Marc Grandisson
+  - Jennifer Gates
+  - Nayel Nassar
+  - Taavet Hinrikus
+  - Dan Zilberman
+  - Robert Williams
+  - Rob Williams
+  - Robert William
+  - Time Lord
 
 junk_words:
   - betting

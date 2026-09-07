@@ -183,20 +183,38 @@ def contains_false_positive_context(post: dict) -> bool:
     return any_phrase_in_text(FALSE_POSITIVE_CONTEXT_PHRASES, text)
 
 
-def non_ambiguous_keywords(keywords: list[str]) -> list[str]:
+def non_ambiguous_keywords(
+    keywords: list[str],
+    *,
+    context_required_keywords: list[str] | None = None,
+) -> list[str]:
+    context_required = {
+        normalize_spaces(str(keyword).lower())
+        for keyword in (context_required_keywords or [])
+        if normalize_spaces(str(keyword).lower())
+    }
     return [
         normalize_spaces(str(keyword).lower())
         for keyword in keywords
         if normalize_spaces(str(keyword).lower())
         and normalize_spaces(str(keyword).lower()) not in AMBIGUOUS_REPOST_KEYWORDS
+        and normalize_spaces(str(keyword).lower()) not in context_required
     ]
 
 
-def has_repost_blazers_context(text: str, keywords: list[str]) -> bool:
+def has_repost_blazers_context(
+    text: str,
+    keywords: list[str],
+    *,
+    context_required_keywords: list[str] | None = None,
+) -> bool:
     if any_phrase_in_text(STRONG_BLAZERS_CONTEXT_PHRASES, text):
         return True
 
-    if any_phrase_in_text(non_ambiguous_keywords(keywords), text):
+    if any_phrase_in_text(
+        non_ambiguous_keywords(keywords, context_required_keywords=context_required_keywords),
+        text,
+    ):
         return True
 
     if phrase_in_text("time lord", text):
@@ -221,7 +239,9 @@ def build_search_queries(config: dict, max_queries: int, configured_queries: lis
             "rip city",
             "blazers",
         ]
-        keywords = [str(keyword).strip().lower() for keyword in config.get("keywords_positive", []) if str(keyword).strip()]
+        configured_keywords = config.get("keywords_search")
+        keywords_source = configured_keywords if configured_keywords else config.get("keywords_positive", [])
+        keywords = [str(keyword).strip().lower() for keyword in keywords_source if str(keyword).strip()]
         candidates = priority + keywords
 
     seen: set[str] = set()
@@ -248,6 +268,7 @@ def candidate_reason(
     bot_handles: list[str],
     min_likes: int,
     skip_replies: bool,
+    context_required_keywords: list[str] | None = None,
 ) -> tuple[bool, str]:
     if not post_uri(post) or not post_cid(post):
         return False, "missing_uri_or_cid"
@@ -263,7 +284,11 @@ def candidate_reason(
         return False, "false_positive_context"
     if not has_keyword(text, keywords):
         return False, "no_keyword"
-    if not has_repost_blazers_context(text, keywords):
+    if not has_repost_blazers_context(
+        text,
+        keywords,
+        context_required_keywords=context_required_keywords,
+    ):
         return False, "not_blazers_context"
     if post_like_count(post) < min_likes:
         return True, "below_threshold"
