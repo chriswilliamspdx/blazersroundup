@@ -62,9 +62,21 @@ def review_response_schema(source, mode=""):
         "fact_check_passed": {"type": "boolean"},
         "blazers_context_confirmed": {"type": "boolean"},
         "current_status_claims": {"type": "boolean"},
-        "entity_ids": selection([e["id"] for e in supported_entities(source, mode)]),
+        "entity_ids": {
+            **selection([e["id"] for e in supported_entities(source, mode)]),
+            "description": (
+                "Machine-readable entity IDs for metadata only. Include the supplied ID for "
+                "each person named in the public summary, but never copy an ID into summary text."
+            ),
+        },
         "source_evidence_ids": selection(list(evidence_catalog(source)), required=True),
-        "summary": {"type": "string"},
+        "summary": {
+            "type": "string",
+            "description": (
+                "Public-facing summary text using names, not machine-readable entity IDs. "
+                "Entity IDs belong only in the entity_ids metadata array."
+            ),
+        },
         "corrections": {"type": "string"},
     }
     return {"type": "object", "properties": fields, "required": [k for k in fields if k != "corrections"]}
@@ -146,6 +158,7 @@ def reference_context(source, mode="", show_name="", today=None):
     fresh = reference_is_fresh(today)
     lines = [
         "Spelling references identify people already mentioned in the source; they are not episode evidence.",
+        "Entity IDs are machine-readable metadata only: use them in entity_ids, never in the public summary text.",
         f"Reference snapshot: {data['verified_on']}. Role status fresh: {str(fresh).lower()}.",
         "Never infer an episode topic from a reference entry. Historical discussion keeps its historical tense.",
     ]
@@ -175,6 +188,15 @@ def unresolved_proper_names(text, source, mode="", show_name="", entity_ids=None
     return re.findall(r"\b[A-Z][A-Za-z]*(?:['\u2019-][A-Za-z]+)*(?:\s+[A-Z][A-Za-z]*(?:['\u2019-][A-Za-z]+)*)+\b", remaining)
 
 
+def contains_reference_entity_id(text):
+    """Return whether public text contains a reference-list ID as a complete token."""
+    for entity in reference()["entities"]:
+        entity_id = entity["id"]
+        if re.search(r"(?<![a-z0-9_])" + re.escape(entity_id) + r"(?![a-z0-9_])", text, re.IGNORECASE):
+            return True
+    return False
+
+
 def validate_review(review, source, mode="", show_name="", limit=250):
     """Return a supported final summary or a reason to use the neutral fallback."""
     if not isinstance(review, dict) or review.get("fact_check_passed") is not True:
@@ -188,6 +210,8 @@ def validate_review(review, source, mode="", show_name="", limit=250):
     if not isinstance(text, str) or not text.strip():
         return "", "empty_summary"
     text = " ".join(text.split())
+    if contains_reference_entity_id(text):
+        return "", "internal_entity_id_in_summary"
     evidence = review.get("source_evidence_ids")
     catalog = evidence_catalog(source)
     if not isinstance(evidence, list) or not evidence or not all(

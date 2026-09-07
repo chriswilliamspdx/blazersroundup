@@ -118,6 +118,52 @@ class SummaryAccuracyTests(unittest.TestCase):
         self.assertEqual(schema["properties"]["source_evidence_ids"]["items"]["enum"], ["E001"])
         self.assertEqual(review_response_schema("Blazers discussion.")["properties"]["entity_ids"]["maxItems"], 0)
         self.assertEqual(validate_review(review(entity_ids=["connor_bergen"]), SOURCE)[1], "unsupported_entity")
+        self.assertIn("metadata only", schema["properties"]["entity_ids"]["description"])
+        self.assertIn("public-facing", schema["properties"]["summary"]["description"].lower())
+
+    def test_internal_entity_ids_never_reach_public_summary(self):
+        source = "The Trail Blazers episode discusses Scoot Henderson's development."
+        leaked = review(
+            summary="The episode discusses Scoot Henderson (scoot_henderson)'s development.",
+            entity_ids=["scoot_henderson"],
+        )
+        self.assertEqual(validate_review(leaked, source)[1], "internal_entity_id_in_summary")
+
+        bare_id = review(
+            summary="The episode discusses scoot_henderson's development.",
+            entity_ids=["scoot_henderson"],
+        )
+        self.assertEqual(validate_review(bare_id, source)[1], "internal_entity_id_in_summary")
+
+        uppercase_id = review(
+            summary="The episode discusses SCOOT_HENDERSON's development.",
+            entity_ids=["scoot_henderson"],
+        )
+        self.assertEqual(validate_review(uppercase_id, source)[1], "internal_entity_id_in_summary")
+
+        undeclared_reference_id = review(
+            summary="The episode discusses mike_richman.",
+            entity_ids=[],
+        )
+        self.assertEqual(validate_review(undeclared_reference_id, source)[1], "internal_entity_id_in_summary")
+
+        clean = review(
+            summary="The episode discusses Scoot Henderson's development.",
+            entity_ids=["scoot_henderson"],
+        )
+        self.assertEqual(validate_review(clean, source)[1], "")
+
+        substring = review(
+            summary="The episode discusses prefixscoot_hendersonsuffix development.",
+            entity_ids=[],
+        )
+        self.assertEqual(validate_review(substring, source)[1], "")
+
+        unsupported = review(
+            summary="The episode discusses Scoot Henderson's development.",
+            entity_ids=["made_up_id"],
+        )
+        self.assertEqual(validate_review(unsupported, source)[1], "unsupported_entity")
 
     def test_reviewer_gets_specific_unverified_names_without_flagging_teams(self):
         source = "Mike Richmond and guest Connor Bergen discuss the Clippers on the Blazers podcast."
@@ -131,6 +177,23 @@ class SummaryAccuracyTests(unittest.TestCase):
         )
         self.assertIn('Unverified names detected in the draft: ["Connor Bergen"]',
                       summarizer.fact_check_summary_json.call_args.args[1])
+
+    def test_leaked_entity_id_uses_fallback_without_an_extra_review_call(self):
+        source = "The Trail Blazers episode discusses Scoot Henderson's development."
+        leaked = review(
+            summary="The episode discusses Scoot Henderson (scoot_henderson)'s development.",
+            entity_ids=["scoot_henderson"],
+        )
+        summarizer = Mock()
+        summarizer.fact_check_summary_json.return_value = leaked
+        poll = main.PollContext(llm_limit=2)
+        result = main.fact_checked_summary_text(
+            settings(), Mock(), summarizer, {}, poll,
+            "video01", "national", source, leaked["summary"],
+        )
+        self.assertEqual(result, main.safe_fallback_summary("national", 250))
+        summarizer.fact_check_summary_json.assert_called_once()
+        self.assertEqual(poll.llm_calls, 1)
 
     def test_evidence_catalog_keeps_excerpts_verbatim_and_excludes_metadata(self):
         source = "Feed type: blazers\nEpisode title: A Portland basketball discussion\nTranscript snippet:\n" + ("word " * 90) + "ends.\nShow name: Fake Person"
