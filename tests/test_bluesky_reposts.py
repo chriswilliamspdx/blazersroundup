@@ -2,6 +2,8 @@ import sys
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "worker"))
@@ -13,7 +15,17 @@ from bluesky_reposts import (  # noqa: E402
 )
 
 
-def post(text, likes=50, handle="fan.bsky.social", uri="at://did:plc:fan/app.bsky.feed.post/abc", reply=False):
+CONFIG = yaml.safe_load((ROOT / "config" / "feeds.youtube.yaml").read_text())
+
+
+def post(
+    text,
+    likes=50,
+    handle="fan.bsky.social",
+    uri="at://did:plc:fan/app.bsky.feed.post/abc",
+    reply=False,
+    reply_shape="top",
+):
     data = {
         "uri": uri,
         "cid": "bafyrei123",
@@ -31,21 +43,18 @@ def post(text, likes=50, handle="fan.bsky.social", uri="at://did:plc:fan/app.bsk
         "quoteCount": 0,
     }
     if reply:
-        data["reply"] = {"root": {"uri": "at://root", "cid": "root"}, "parent": {"uri": "at://parent", "cid": "parent"}}
+        reply_data = {"root": {"uri": "at://root", "cid": "root"}, "parent": {"uri": "at://parent", "cid": "parent"}}
+        if reply_shape in {"top", "both"}:
+            data["reply"] = reply_data
+        if reply_shape in {"record", "both"}:
+            data["record"]["reply"] = reply_data
     return data
 
 
 class BlueskyRepostTests(unittest.TestCase):
     def setUp(self):
-        self.keywords = [
-            "portland trail blazers",
-            "shaedon sharpe",
-            "shaydon sharp",
-            "robert williams",
-            "time lord",
-            "blazers",
-            "rip city",
-        ]
+        self.keywords = CONFIG["keywords_positive"]
+        self.context_required_keywords = CONFIG["keywords_context_required"]
 
     def test_ready_when_recent_post_has_keyword_and_threshold(self):
         ok, reason = candidate_reason(
@@ -85,6 +94,72 @@ class BlueskyRepostTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(reason, "junk")
+
+    def test_generic_blazers_game_context_is_blocked_with_or_without_reply_filtering(self):
+        text = "(Oops: the OG Ballblazer was an Atari 8-bit game first, about 3 months before it hit C64, apologies to all fans of balls and blazers.)"
+        for skip_replies in [True, False]:
+            ok, reason = candidate_reason(
+                post(text, likes=29, reply=True, reply_shape="record"),
+                keywords=self.keywords,
+                context_required_keywords=self.context_required_keywords,
+                junk_words=DEFAULT_JUNK_WORDS,
+                bot_handles=["blazersroundup.bsky.social"],
+                min_likes=20,
+                skip_replies=skip_replies,
+            )
+            self.assertFalse(ok)
+            self.assertEqual(reason, "reply" if skip_replies else "not_blazers_context")
+
+        ok, reason = candidate_reason(
+            post(text, likes=29),
+            keywords=self.keywords,
+            context_required_keywords=self.context_required_keywords,
+            junk_words=DEFAULT_JUNK_WORDS,
+            bot_handles=["blazersroundup.bsky.social"],
+            min_likes=20,
+            skip_replies=True,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "not_blazers_context")
+
+    def test_basketball_context_cues_are_token_bounded(self):
+        for text in ["Blazers pinball game", "Blazers WNBA team"]:
+            ok, reason = candidate_reason(
+                post(text, likes=120),
+                keywords=self.keywords,
+                junk_words=DEFAULT_JUNK_WORDS,
+                bot_handles=["blazersroundup.bsky.social"],
+                min_likes=50,
+                skip_replies=True,
+            )
+            self.assertFalse(ok)
+            self.assertEqual(reason, "not_blazers_context")
+
+    def test_nba_context_is_case_insensitive_and_token_bounded(self):
+        ok, reason = candidate_reason(
+            post("Blazers NBA update", likes=120),
+            keywords=["blazers"],
+            junk_words=DEFAULT_JUNK_WORDS,
+            bot_handles=["blazersroundup.bsky.social"],
+            min_likes=50,
+            skip_replies=True,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ready")
+
+    def test_replies_are_detected_in_top_record_or_both_shapes(self):
+        for reply_shape in ["top", "record", "both"]:
+            for skip_replies in [True, False]:
+                ok, reason = candidate_reason(
+                    post("Blazers NBA update", likes=120, reply=True, reply_shape=reply_shape),
+                    keywords=["blazers"],
+                    junk_words=DEFAULT_JUNK_WORDS,
+                    bot_handles=["blazersroundup.bsky.social"],
+                    min_likes=50,
+                    skip_replies=skip_replies,
+                )
+                self.assertEqual((ok, reason), (not skip_replies, "ready" if not skip_replies else "reply"))
 
     def test_bot_posts_are_blocked(self):
         ok, reason = candidate_reason(

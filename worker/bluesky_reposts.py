@@ -64,30 +64,6 @@ TIME_LORD_CONTEXT_PHRASES = [
 BASKETBALL_CONTEXT_PHRASES = [
     "nba",
     "basketball",
-    "game",
-    "roster",
-    "trade",
-    "draft",
-    "pick",
-    "lottery",
-    "coach",
-    "guard",
-    "center",
-    "forward",
-    "wing",
-    "playoff",
-    "playoffs",
-    "finals",
-    "summer league",
-    "free agency",
-    "contract",
-    "extension",
-    "rookie",
-    "season",
-    "offseason",
-    "team",
-    "arena",
-    "moda center",
 ]
 
 
@@ -109,6 +85,17 @@ def phrase_in_text(phrase: str, text: str) -> bool:
     normalized_phrase = normalize_match_text(phrase)
     normalized_text = normalize_match_text(text)
     return bool(normalized_phrase and normalized_phrase in normalized_text)
+
+
+def whole_phrase_in_text(phrase: str, text: str) -> bool:
+    normalized_phrase = normalize_match_text(phrase)
+    normalized_text = normalize_match_text(text)
+    if not normalized_phrase or not normalized_text:
+        return False
+    phrase_words = normalized_phrase.split()
+    text_words = normalized_text.split()
+    width = len(phrase_words)
+    return any(text_words[index : index + width] == phrase_words for index in range(len(text_words) - width + 1))
 
 
 def any_phrase_in_text(phrases: list[str], text: str) -> bool:
@@ -171,7 +158,7 @@ def post_quote_count(post: dict) -> int:
 
 
 def is_reply(post: dict) -> bool:
-    return bool(post.get("reply"))
+    return bool(post.get("reply") or (post.get("record") or {}).get("reply"))
 
 
 def contains_junk(text: str, junk_words: list[str]) -> bool:
@@ -221,7 +208,7 @@ def has_repost_blazers_context(
         return any_phrase_in_text(TIME_LORD_CONTEXT_PHRASES, text)
 
     if phrase_in_text("blazers", text):
-        return any_phrase_in_text(BASKETBALL_CONTEXT_PHRASES, text)
+        return any(whole_phrase_in_text(phrase, text) for phrase in BASKETBALL_CONTEXT_PHRASES)
 
     if phrase_in_text("portland", text):
         return any_phrase_in_text(["nba", "basketball", "trail blazers", "rip city", "moda center"], text)
